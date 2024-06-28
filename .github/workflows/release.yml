@@ -1,8 +1,6 @@
 name: Release to PyPI and documentation
 
-on:
-  push:
-    tags: ["python-v*"]
+on: push
 
 defaults:
   run:
