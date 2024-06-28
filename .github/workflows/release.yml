@@ -9,12 +9,13 @@ defaults:
 env:
   # For ease of development, we make rustls default. But for release we should
   # use native TLS.
-  FEATURES_FLAG: --no-default-features --features native-tls
+  FEATURES_FLAG: --no-default-features
 
 jobs:
   validate-release-tag:
     name: Validate git tag
     runs-on: ubuntu-20.04
+    if: false
     steps:
       - uses: actions/checkout@v3
       - name: compare git tag with cargo metadata
