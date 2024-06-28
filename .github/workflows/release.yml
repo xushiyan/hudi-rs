@@ -59,7 +59,7 @@ jobs:
       - name: Publish to testpypi (without sdist)
         uses: PyO3/maturin-action@v1
         env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_TOKEN_TEST }}
           MATURIN_REPOSITORY: testpypi
         with:
           target: x86_64-pc-windows-msvc
@@ -76,7 +76,7 @@ jobs:
       - name: Publish manylinux to testpypi x86_64 (with sdist)
         uses: PyO3/maturin-action@v1
         env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_TOKEN_TEST }}
           MATURIN_REPOSITORY: testpypi
         with:
           target: x86_64-unknown-linux-gnu
@@ -88,7 +88,7 @@ jobs:
       - name: Publish manylinux to testpypi aarch64 (without sdist)
         uses: PyO3/maturin-action@v1
         env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_TOKEN_TEST }}
           MATURIN_REPOSITORY: testpypi
         with:
           target: aarch64-unknown-linux-gnu
