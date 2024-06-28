@@ -28,7 +28,6 @@ jobs:
           fi
 
   release-pypi-mac:
-    needs: validate-release-tag
     name: PyPI release on Mac
     strategy:
       fail-fast: false
@@ -49,7 +48,6 @@ jobs:
           args: --skip-existing -m python/Cargo.toml --no-sdist ${{ env.FEATURES_FLAG }}
 
   release-pypi-windows:
-    needs: validate-release-tag
     name: PyPI release on Windows
     runs-on: windows-latest
     steps:
@@ -66,7 +64,6 @@ jobs:
           args: --skip-existing -m python/Cargo.toml --no-sdist ${{ env.FEATURES_FLAG }}
 
   release-pypi-manylinux:
-    needs: validate-release-tag
     name: PyPI release manylinux
     runs-on: ubuntu-latest
     steps:
