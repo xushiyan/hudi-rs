@@ -36,6 +36,7 @@ repository = "https://github.com/apache/hudi-rs"
 [workspace.dependencies]
 # arrow
 arrow = { version = "= 53.4.0", features = ["pyarrow"] }
+arrow-avro = { git = "https://github.com/xushiyan/arrow-rs.git", rev = "94cfd033e0243eb742def465cf2b9dc937d02dd5" }
 arrow-arith = { version = "= 53.4.0" }
 arrow-array = { version = "= 53.4.0" }
 arrow-buffer = { version = "= 53.4.0" }
@@ -48,6 +49,9 @@ arrow-schema = { version = "= 53.4.0", features = ["serde"] }
 arrow-select = { version = "= 53.4.0" }
 object_store = { version = "= 0.11.2", features = ["aws", "azure", "gcp"] }
 parquet = { version = "= 53.4.0", features = ["async", "object_store"] }
+
+# avro
+apache-avro = { version = "0.16" }
 
 # datafusion
 datafusion = { version = "= 43.0.0" }

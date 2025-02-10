@@ -17,7 +17,7 @@
  * under the License.
  */
 
-CREATE TABLE v6_complexkeygen_hivestyle (
+CREATE TABLE v6_complexkeygen_hivestyle_3 (
                                             id INT,
                                             name STRING,
                                             isActive BOOLEAN,
@@ -51,12 +51,11 @@ TBLPROPERTIES (
     'hoodie.datasource.write.hive_style_partitioning' = 'true',
     'hoodie.table.log.file.format' = 'PARQUET',
     'hoodie.logfile.data.block.format' = 'parquet',
-    'hoodie.datasource.write.record.merger.impls' = 'org.apache.hudi.HoodieSparkRecordMerger',
     'hoodie.parquet.small.file.limit' = '0'
 )
 PARTITIONED BY (byteField, shortField);
 
-INSERT INTO v6_complexkeygen_hivestyle VALUES
+INSERT INTO v6_complexkeygen_hivestyle_3 VALUES
                                            (1, 'Alice', true, 15000, 1234567890, 1.0, 3.14159, 12345.67890, CAST('2023-04-01' AS DATE), CAST('2023-04-01 12:01:00' AS TIMESTAMP), CAST('binary data' AS BINARY),
                                             ARRAY(STRUCT('red', 100), STRUCT('blue', 200), STRUCT('green', 300)),
                                             MAP('key1', STRUCT(123.456, true), 'key2', STRUCT(789.012, false)),
@@ -76,7 +75,7 @@ INSERT INTO v6_complexkeygen_hivestyle VALUES
                                             10, 300
                                            );
 
-INSERT INTO v6_complexkeygen_hivestyle VALUES
+INSERT INTO v6_complexkeygen_hivestyle_3 VALUES
                                            (1, 'Alice', false, 15000, 1234567890, 1.0, 3.14159, 12345.67890, CAST('2023-04-01' AS DATE), CAST('2023-04-01 12:01:00' AS TIMESTAMP), CAST('binary data' AS BINARY),
                                             ARRAY(STRUCT('red', 100), STRUCT('blue', 200), STRUCT('green', 300)),
                                             MAP('key1', STRUCT(123.456, true), 'key2', STRUCT(789.012, false)),
@@ -89,3 +88,5 @@ INSERT INTO v6_complexkeygen_hivestyle VALUES
                                             STRUCT('Diana', 50, STRUCT(987.654, true)),
                                             30, 100
                                            );
+
+DELETE FROM v6_complexkeygen_hivestyle_3 WHERE ((id = 1 AND name = 'Alice') or (id = 3 AND name = 'Carol')) AND byteField = 10 AND shortField = 300;

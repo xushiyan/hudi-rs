@@ -58,10 +58,11 @@ impl LogFileScanner {
                 if block.is_rollback_block() {
                     rollback_targets.insert(block.target_instant_time()?.to_string());
                 }
+                if block.is_delete_block() {
+                    // TODO handle delete block
+                }
             }
 
-            // only rollback and parquet data blocks are supported
-            // TODO: support more block types
             // push the whole vector to avoid cloning
             all_blocks.push(blocks);
         }

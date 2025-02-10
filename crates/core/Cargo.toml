@@ -30,6 +30,7 @@ repository.workspace = true
 [dependencies]
 # arrow
 arrow = { workspace = true }
+arrow-avro = { workspace = true }
 arrow-arith = { workspace = true }
 arrow-array = { workspace = true }
 arrow-buffer = { workspace = true }
@@ -42,6 +43,9 @@ arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
 object_store = { workspace = true }
 parquet = { workspace = true }
+
+# avro
+apache-avro = { workspace = true }
 
 # serde
 serde = { workspace = true }
@@ -65,7 +69,7 @@ futures = { workspace = true }
 tokio = { workspace = true }
 
 # datafusion
-datafusion = { workspace = true, optional = true }
+datafusion = { workspace = true, optional = true, features = ["avro"] }
 datafusion-expr = { workspace = true, optional = true }
 datafusion-common = { workspace = true, optional = true }
 datafusion-physical-expr = { workspace = true, optional = true }
@@ -75,6 +79,7 @@ percent-encoding = { workspace = true }
 hudi-test = { path = "../test" }
 
 [features]
+default = ["datafusion"]
 datafusion = [
     "dep:datafusion",
     "datafusion-expr",

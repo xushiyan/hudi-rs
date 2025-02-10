@@ -297,6 +297,14 @@ mod tests {
         )
     }
 
+    fn get_valid_log_avro_delete() -> (String, String) {
+        let dir = PathBuf::from("tests/data/log_files/valid_log_avro_delete");
+        (
+            canonicalize(dir).unwrap().to_str().unwrap().to_string(),
+            ".74e73b70-d681-4b27-9389-5c41d77897fe-0_20250209014234708.log.2_0-145-201".to_string(),
+        )
+    }
+
     async fn create_log_file_reader(
         dir: &str,
         file_name: &str,
@@ -351,6 +359,19 @@ mod tests {
         assert_eq!(block.command_block_type()?, CommandBlock::Rollback);
         assert!(block.record_batches.is_empty());
         assert!(block.footer.is_empty());
+
+        Ok(())
+    }
+
+    #[cfg_attr(feature = "datafusion", tokio::test)]
+    async fn test_read_log_file_with_delete_block() -> Result<()> {
+        let (dir, file_name) = get_valid_log_avro_delete();
+        let mut reader = create_log_file_reader(&dir, &file_name).await?;
+        let instant_range = InstantRange::up_to("20250209014243389", "utc");
+        let blocks = reader.read_all_blocks(&instant_range)?;
+
+        let block = &blocks[0];
+        println!("{:?}", block);
 
         Ok(())
     }

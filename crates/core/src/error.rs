@@ -27,11 +27,18 @@ pub enum CoreError {
     #[error(transparent)]
     ArrowError(#[from] arrow::error::ArrowError),
 
+    #[error(transparent)]
+    AvroError(#[from] apache_avro::Error),
+
     #[error("Config error: {0}")]
     Config(#[from] ConfigError),
 
     #[error("Commit metadata error: {0}")]
     CommitMetadata(String),
+
+    #[cfg(feature = "datafusion")]
+    #[error(transparent)]
+    DataFusionError(#[from] datafusion::error::DataFusionError),
 
     #[error("{0}")]
     MergeRecordError(String),

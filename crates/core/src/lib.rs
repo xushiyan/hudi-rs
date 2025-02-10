@@ -53,5 +53,6 @@ pub mod storage;
 pub mod table;
 pub mod timeline;
 pub mod util;
+mod schema;
 
 use error::Result;

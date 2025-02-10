@@ -72,6 +72,11 @@ impl LogFormatVersion {
     }
 
     #[inline]
+    pub fn supports_avro_delete_block(&self) -> bool {
+        matches!(self, LogFormatVersion::V3)
+    }
+
+    #[inline]
     pub fn has_footer(&self) -> bool {
         matches!(self, LogFormatVersion::V1)
     }

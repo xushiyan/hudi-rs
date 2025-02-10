@@ -20,11 +20,16 @@
 use crate::error::CoreError;
 use crate::file_group::log_file::log_format::LogFormatVersion;
 use crate::Result;
+use crate::schema::schema_for_delete_record_list;
 use arrow_array::RecordBatch;
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use std::collections::HashMap;
+use std::io::{BufReader, Cursor, Read, Seek};
+use std::path::PathBuf;
 use std::str::FromStr;
+use arrow_schema::SchemaRef;
+use parquet::data_type::AsBytes;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -165,17 +170,109 @@ pub struct LogBlock {
 impl LogBlock {
     pub fn decode_content(block_type: &BlockType, content: Vec<u8>) -> Result<Vec<RecordBatch>> {
         match block_type {
+            BlockType::Command => Ok(Vec::new()),
             BlockType::ParquetData => {
-                let record_bytes = Bytes::from(content);
-                let parquet_reader = ParquetRecordBatchReader::try_new(record_bytes, 1024)?;
+                let content_bytes = Bytes::from(content);
+                let parquet_reader = ParquetRecordBatchReader::try_new(content_bytes, 1024)?;
                 let mut batches = Vec::new();
                 for item in parquet_reader {
                     let batch = item.map_err(CoreError::ArrowError)?;
                     batches.push(batch);
                 }
                 Ok(batches)
-            }
-            BlockType::Command => Ok(Vec::new()),
+            },
+            BlockType::AvroData => {
+                use arrow_avro::schema::Schema as AvroSchema;
+                use serde_json;
+
+                let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("schemas")
+                    .join("HoodieDeleteRecordList.avsc");
+                let schema_content = std::fs::read(schema_path)?;
+                let avro_schema: AvroSchema = serde_json::from_slice(schema_content.as_bytes())
+                    .map_err(|e| CoreError::Schema(e.to_string()))?;
+                println!("avro_schema: {:?}", avro_schema);
+
+                use arrow_avro::codec::AvroField;
+                use arrow_avro::reader::record::RecordDecoder;
+                use arrow_avro::reader::Decoder;
+
+                let root_field = AvroField::try_from(&avro_schema)
+                    .map_err(|e| CoreError::Schema(e.to_string()))?;
+                let record_decoder = RecordDecoder::try_new(root_field.data_type(), true)
+                    .map_err(|e| CoreError::Schema(e.to_string()))?;
+                let mut decoder = Decoder::new(record_decoder, 100);
+
+                // get avro bytes
+                let content_bytes = Bytes::from(content);
+                println!("{:?}", &content_bytes[8..]);
+                println!("total length {}", content_bytes.len());
+                let mut content_reader = BufReader::new(Cursor::new(content_bytes));
+                let mut size_buf = [0u8; 4];
+                content_reader.read_exact(&mut size_buf)?;
+                let format_version = u32::from_be_bytes(size_buf) as usize;
+                println!("format_version: {}", format_version);
+
+                let mut size_buf = [0u8; 4];
+                content_reader.read_exact(&mut size_buf)?;
+                let length = u32::from_be_bytes(size_buf) as usize;
+                println!("length: {}", length);
+
+                println!("pos to start decoding: {:?}", content_reader.stream_position());
+                let mut size_buf = vec![0u8; length];
+                content_reader.read_exact(&mut size_buf)?;
+
+                let consumed = decoder.decode(size_buf.as_slice(), 100).map_err(|e| CoreError::Schema(e.to_string()))?;
+                println!("consumed: {}", consumed);
+
+                let batch = decoder.flush().map_err(|e| CoreError::Schema(e.to_string()))?;
+                println!("batch: {:?}", batch);
+
+                Ok(Vec::new())
+            },
+            #[cfg(feature = "datafusion")]
+            BlockType::Delete => {
+                use datafusion::datasource::avro_to_arrow::ReaderBuilder;
+                use datafusion::datasource::avro_to_arrow::to_arrow_schema;
+                use apache_avro::Reader;
+                use apache_avro::from_avro_datum;
+                use arrow_avro::reader::Decoder;
+
+                let avro_schema = schema_for_delete_record_list()?;
+                let schema = to_arrow_schema(&avro_schema)?;
+                let schema = SchemaRef::new(schema);
+
+                let content_bytes = Bytes::from(content);
+                println!("{:?}", &content_bytes[8..]);
+                println!("total length {}", content_bytes.len());
+                let mut content_reader = BufReader::new(Cursor::new(content_bytes));
+                let mut size_buf = [0u8; 4];
+                content_reader.read_exact(&mut size_buf)?;
+                let format_version = u32::from_be_bytes(size_buf) as usize;
+                println!("format_version: {}", format_version);
+
+                let mut size_buf = [0u8; 4];
+                content_reader.read_exact(&mut size_buf)?;
+                let length = u32::from_be_bytes(size_buf) as usize;
+                println!("length: {}", length);
+
+                println!("pos: {:?}", content_reader.stream_position());
+
+                let avro_value = from_avro_datum(&avro_schema, &mut content_reader, None)?;
+                println!("avro_value: {:?}", avro_value);
+
+                // TODO: apply projection to avro reader
+                // let reader = ReaderBuilder::new()
+                //     .with_schema(schema)
+                //     .with_batch_size(1024)
+                //     .build(&mut content_reader)?;
+                // let mut batches = Vec::new();
+                // for batch in reader {
+                //     batches.push(batch?);
+                // }
+                Ok(Vec::new())
+
+            },
             _ => Err(CoreError::LogBlockError(format!(
                 "Unsupported block type: {block_type:?}"
             ))),
@@ -230,6 +327,10 @@ impl LogBlock {
 
     pub fn is_rollback_block(&self) -> bool {
         matches!(self.command_block_type(), Ok(CommandBlock::Rollback))
+    }
+
+    pub fn is_delete_block(&self) -> bool {
+        self.block_type == BlockType::Delete
     }
 }
 
