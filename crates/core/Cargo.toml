@@ -43,6 +43,9 @@ arrow-select = { workspace = true }
 object_store = { workspace = true }
 parquet = { workspace = true }
 
+# avro
+apache-avro = { workspace = true }
+
 # serde
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -75,6 +78,7 @@ percent-encoding = { workspace = true }
 hudi-test = { path = "../test" }
 
 [features]
+default = ["datafusion"]
 datafusion = [
     "dep:datafusion",
     "datafusion-expr",
