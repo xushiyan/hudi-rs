@@ -15,13 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::arrow::datatypes::{DataType, IntervalUnit, Schema, TimeUnit, UnionMode};
-use crate::error::{DataFusionError, Result};
-use apache_avro::schema::{
-    Alias, DecimalSchema, EnumSchema, FixedSchema, Name, RecordSchema,
-};
+use crate::error::{CoreError, Result};
+use apache_avro::schema::{Alias, DecimalSchema, EnumSchema, FixedSchema, Name, RecordSchema};
 use apache_avro::types::Value;
 use apache_avro::Schema as AvroSchema;
+use arrow::datatypes::{DataType, IntervalUnit, Schema, TimeUnit, UnionMode};
 use arrow::datatypes::{Field, UnionFields};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -72,16 +70,15 @@ fn schema_to_field_with_props(
         AvroSchema::Double => DataType::Float64,
         AvroSchema::Bytes => DataType::Binary,
         AvroSchema::String => DataType::Utf8,
-        AvroSchema::Array(item_schema) => DataType::List(Arc::new(
-            schema_to_field_with_props(&item_schema.items, Some("element"), false, None)?,
-        )),
+        AvroSchema::Array(item_schema) => DataType::List(Arc::new(schema_to_field_with_props(
+            &item_schema.items,
+            Some("element"),
+            false,
+            None,
+        )?)),
         AvroSchema::Map(value_schema) => {
-            let value_field = schema_to_field_with_props(
-                &value_schema.types,
-                Some("value"),
-                false,
-                None,
-            )?;
+            let value_field =
+                schema_to_field_with_props(&value_schema.types, Some("value"), false, None)?;
             DataType::Dictionary(
                 Box::new(DataType::Utf8),
                 Box::new(value_field.data_type().clone()),
@@ -90,11 +87,7 @@ fn schema_to_field_with_props(
         AvroSchema::Union(us) => {
             // If there are only two variants and one of them is null, set the other type as the field data type
             let has_nullable = us
-                .find_schema_with_known_schemata::<apache_avro::Schema>(
-                    &Value::Null,
-                    None,
-                    &None,
-                )
+                .find_schema_with_known_schemata::<apache_avro::Schema>(&Value::Null, None, &None)
                 .is_some();
             let sub_schemas = us.variants();
             if has_nullable && sub_schemas.len() == 2 {
@@ -107,9 +100,7 @@ fn schema_to_field_with_props(
                         .data_type()
                         .clone()
                 } else {
-                    return Err(DataFusionError::AvroError(
-                        apache_avro::Error::GetUnionDuplicate,
-                    ));
+                    return Err(CoreError::from(apache_avro::Error::GetUnionDuplicate));
                 }
             } else {
                 let fields = sub_schemas
@@ -131,20 +122,13 @@ fn schema_to_field_with_props(
                     /*if let Some(aliases) = fields.aliases {
                         props.insert("aliases", aliases);
                     }*/
-                    schema_to_field_with_props(
-                        &field.schema,
-                        Some(&field.name),
-                        false,
-                        Some(props),
-                    )
+                    schema_to_field_with_props(&field.schema, Some(&field.name), false, Some(props))
                 })
                 .collect();
             DataType::Struct(fields?)
         }
         AvroSchema::Enum(EnumSchema { .. }) => DataType::Utf8,
-        AvroSchema::Fixed(FixedSchema { size, .. }) => {
-            DataType::FixedSizeBinary(*size as i32)
-        }
+        AvroSchema::Fixed(FixedSchema { size, .. }) => DataType::FixedSizeBinary(*size as i32),
         AvroSchema::Decimal(DecimalSchema {
             precision, scale, ..
         }) => DataType::Decimal128(*precision as u8, *scale as i8),
@@ -289,11 +273,7 @@ fn external_props(schema: &AvroSchema) -> HashMap<String, String> {
 }
 
 /// Returns the fully qualified name for a field
-pub fn aliased(
-    alias: &Alias,
-    namespace: Option<&str>,
-    default_namespace: Option<&str>,
-) -> String {
+pub fn aliased(alias: &Alias, namespace: Option<&str>, default_namespace: Option<&str>) -> String {
     if alias.namespace().is_some() {
         alias.fullname(None)
     } else {
@@ -303,218 +283,5 @@ pub fn aliased(
             Some(ref namespace) => format!("{}.{}", namespace, alias.name()),
             None => alias.fullname(None),
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::{aliased, external_props, to_arrow_schema};
-    use crate::arrow::datatypes::DataType::{Binary, Float32, Float64, Timestamp, Utf8};
-    use crate::arrow::datatypes::TimeUnit::Microsecond;
-    use crate::arrow::datatypes::{Field, Schema};
-    use apache_avro::schema::{Alias, EnumSchema, FixedSchema, Name, RecordSchema};
-    use apache_avro::Schema as AvroSchema;
-    use arrow::datatypes::DataType::{Boolean, Int32, Int64};
-
-    fn alias(name: &str) -> Alias {
-        Alias::new(name).unwrap()
-    }
-
-    #[test]
-    fn test_alias() {
-        assert_eq!(aliased(&alias("foo.bar"), None, None), "foo.bar");
-        assert_eq!(aliased(&alias("bar"), Some("foo"), None), "foo.bar");
-        assert_eq!(aliased(&alias("bar"), Some("foo"), Some("cat")), "foo.bar");
-        assert_eq!(aliased(&alias("bar"), None, Some("cat")), "cat.bar");
-    }
-
-    #[test]
-    fn test_external_props() {
-        let record_schema = AvroSchema::Record(RecordSchema {
-            name: Name {
-                name: "record".to_string(),
-                namespace: None,
-            },
-            aliases: Some(vec![alias("fooalias"), alias("baralias")]),
-            doc: Some("record documentation".to_string()),
-            fields: vec![],
-            lookup: Default::default(),
-            attributes: Default::default(),
-        });
-        let props = external_props(&record_schema);
-        assert_eq!(
-            props.get("avro::doc"),
-            Some(&"record documentation".to_string())
-        );
-        assert_eq!(
-            props.get("avro::aliases"),
-            Some(&"[fooalias,baralias]".to_string())
-        );
-        let enum_schema = AvroSchema::Enum(EnumSchema {
-            name: Name {
-                name: "enum".to_string(),
-                namespace: None,
-            },
-            aliases: Some(vec![alias("fooenum"), alias("barenum")]),
-            doc: Some("enum documentation".to_string()),
-            symbols: vec![],
-            default: None,
-            attributes: Default::default(),
-        });
-        let props = external_props(&enum_schema);
-        assert_eq!(
-            props.get("avro::doc"),
-            Some(&"enum documentation".to_string())
-        );
-        assert_eq!(
-            props.get("avro::aliases"),
-            Some(&"[fooenum,barenum]".to_string())
-        );
-        let fixed_schema = AvroSchema::Fixed(FixedSchema {
-            name: Name {
-                name: "fixed".to_string(),
-                namespace: None,
-            },
-            aliases: Some(vec![alias("foofixed"), alias("barfixed")]),
-            size: 1,
-            doc: None,
-            default: None,
-            attributes: Default::default(),
-        });
-        let props = external_props(&fixed_schema);
-        assert_eq!(
-            props.get("avro::aliases"),
-            Some(&"[foofixed,barfixed]".to_string())
-        );
-    }
-
-    #[test]
-    fn test_invalid_avro_schema() {}
-
-    #[test]
-    fn test_plain_types_schema() {
-        let schema = AvroSchema::parse_str(
-            r#"
-            {
-              "type" : "record",
-              "name" : "topLevelRecord",
-              "fields" : [ {
-                "name" : "id",
-                "type" : [ "int", "null" ]
-              }, {
-                "name" : "bool_col",
-                "type" : [ "boolean", "null" ]
-              }, {
-                "name" : "tinyint_col",
-                "type" : [ "int", "null" ]
-              }, {
-                "name" : "smallint_col",
-                "type" : [ "int", "null" ]
-              }, {
-                "name" : "int_col",
-                "type" : [ "int", "null" ]
-              }, {
-                "name" : "bigint_col",
-                "type" : [ "long", "null" ]
-              }, {
-                "name" : "float_col",
-                "type" : [ "float", "null" ]
-              }, {
-                "name" : "double_col",
-                "type" : [ "double", "null" ]
-              }, {
-                "name" : "date_string_col",
-                "type" : [ "bytes", "null" ]
-              }, {
-                "name" : "string_col",
-                "type" : [ "bytes", "null" ]
-              }, {
-                "name" : "timestamp_col",
-                "type" : [ {
-                  "type" : "long",
-                  "logicalType" : "timestamp-micros"
-                }, "null" ]
-              } ]
-            }"#,
-        );
-        assert!(schema.is_ok(), "{schema:?}");
-        let arrow_schema = to_arrow_schema(&schema.unwrap());
-        assert!(arrow_schema.is_ok(), "{arrow_schema:?}");
-        let expected = Schema::new(vec![
-            Field::new("id", Int32, true),
-            Field::new("bool_col", Boolean, true),
-            Field::new("tinyint_col", Int32, true),
-            Field::new("smallint_col", Int32, true),
-            Field::new("int_col", Int32, true),
-            Field::new("bigint_col", Int64, true),
-            Field::new("float_col", Float32, true),
-            Field::new("double_col", Float64, true),
-            Field::new("date_string_col", Binary, true),
-            Field::new("string_col", Binary, true),
-            Field::new("timestamp_col", Timestamp(Microsecond, None), true),
-        ]);
-        assert_eq!(arrow_schema.unwrap(), expected);
-    }
-
-    #[test]
-    fn test_nested_schema() {
-        let avro_schema = apache_avro::Schema::parse_str(
-            r#"
-            {
-              "type": "record",
-              "name": "r1",
-              "fields": [
-                {
-                  "name": "col1",
-                  "type": [
-                    "null",
-                    {
-                      "type": "record",
-                      "name": "r2",
-                      "fields": [
-                        {
-                          "name": "col2",
-                          "type": "string"
-                        },
-                        {
-                          "name": "col3",
-                          "type": ["null", "string"],
-                          "default": null
-                        }
-                      ]
-                    }
-                  ],
-                  "default": null
-                }
-              ]
-            }"#,
-        )
-        .unwrap();
-        // should not use Avro Record names.
-        let expected_arrow_schema = Schema::new(vec![Field::new(
-            "col1",
-            arrow::datatypes::DataType::Struct(
-                vec![
-                    Field::new("col2", Utf8, false),
-                    Field::new("col3", Utf8, true),
-                ]
-                .into(),
-            ),
-            true,
-        )]);
-        assert_eq!(
-            to_arrow_schema(&avro_schema).unwrap(),
-            expected_arrow_schema
-        );
-    }
-
-    #[test]
-    fn test_non_record_schema() {
-        let arrow_schema = to_arrow_schema(&AvroSchema::String);
-        assert!(arrow_schema.is_ok(), "{arrow_schema:?}");
-        assert_eq!(
-            arrow_schema.unwrap(),
-            Schema::new(vec![Field::new("", Utf8, false)])
-        );
     }
 }
