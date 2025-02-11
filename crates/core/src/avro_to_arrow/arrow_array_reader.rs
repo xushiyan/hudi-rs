@@ -17,35 +17,33 @@
 
 //! Avro to Arrow array readers
 
-use crate::arrow::array::{
-    make_array, Array, ArrayBuilder, ArrayData, ArrayDataBuilder, ArrayRef,
-    BooleanBuilder, LargeStringArray, ListBuilder, NullArray, OffsetSizeTrait,
-    PrimitiveArray, StringArray, StringBuilder, StringDictionaryBuilder,
-};
-use crate::arrow::buffer::{Buffer, MutableBuffer};
-use crate::arrow::datatypes::{
-    ArrowDictionaryKeyType, ArrowNumericType, ArrowPrimitiveType, DataType, Date32Type,
-    Date64Type, Field, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
-    Int8Type, Schema, Time32MillisecondType, Time32SecondType, Time64MicrosecondType,
-    Time64NanosecondType, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
-    TimestampNanosecondType, TimestampSecondType, UInt16Type, UInt32Type, UInt64Type,
-    UInt8Type,
-};
-use crate::arrow::error::ArrowError;
-use crate::arrow::record_batch::RecordBatch;
-use crate::arrow::util::bit_util;
-use crate::error::{DataFusionError, Result};
+use crate::error::{CoreError, Result};
 use apache_avro::schema::RecordSchema;
 use apache_avro::{
     schema::{Schema as AvroSchema, SchemaKind},
     types::Value,
     AvroResult, Error as AvroError, Reader as AvroReader,
 };
+use arrow::array::{
+    make_array, Array, ArrayBuilder, ArrayData, ArrayDataBuilder, ArrayRef, BooleanBuilder,
+    LargeStringArray, ListBuilder, NullArray, OffsetSizeTrait, PrimitiveArray, StringArray,
+    StringBuilder, StringDictionaryBuilder,
+};
 use arrow::array::{BinaryArray, FixedSizeBinaryArray, GenericListArray};
+use arrow::buffer::{Buffer, MutableBuffer};
+use arrow::datatypes::{
+    ArrowDictionaryKeyType, ArrowNumericType, ArrowPrimitiveType, DataType, Date32Type, Date64Type,
+    Field, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, Schema,
+    Time32MillisecondType, Time32SecondType, Time64MicrosecondType, Time64NanosecondType, TimeUnit,
+    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+    TimestampSecondType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+};
 use arrow::datatypes::{Fields, SchemaRef};
+use arrow::error::ArrowError;
 use arrow::error::ArrowError::SchemaError;
 use arrow::error::Result as ArrowResult;
-use datafusion_common::arrow_err;
+use arrow::record_batch::RecordBatch;
+use arrow::util::bit_util;
 use num_traits::NumCast;
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -61,11 +59,7 @@ pub struct AvroArrowArrayReader<'a, R: Read> {
 }
 
 impl<R: Read> AvroArrowArrayReader<'_, R> {
-    pub fn try_new(
-        reader: R,
-        schema: SchemaRef,
-        projection: Option<Vec<String>>,
-    ) -> Result<Self> {
+    pub fn try_new(reader: R, schema: SchemaRef, projection: Option<Vec<String>>) -> Result<Self> {
         let reader = AvroReader::new(reader)?;
         let writer_schema = reader.writer_schema().clone();
         let schema_lookup = Self::schema_lookup(writer_schema)?;
@@ -87,9 +81,9 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
                 }
                 Ok(lookup)
             }
-            _ => arrow_err!(SchemaError(
+            _ => Err(CoreError::from(SchemaError(
                 "expected avro schema to be a record".to_string(),
-            )),
+            ))),
         }
     }
 
@@ -112,23 +106,17 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
                     if let Some(sub_schema) =
                         sub_schemas.iter().find(|&s| !matches!(s, AvroSchema::Null))
                     {
-                        Self::child_schema_lookup(
-                            parent_field_name,
-                            sub_schema,
-                            schema_lookup,
-                        )?;
+                        Self::child_schema_lookup(parent_field_name, sub_schema, schema_lookup)?;
                     }
                 }
             }
             AvroSchema::Record(RecordSchema { fields, lookup, .. }) => {
                 lookup.iter().for_each(|(field_name, pos)| {
-                    schema_lookup
-                        .insert(format!("{}.{}", parent_field_name, field_name), *pos);
+                    schema_lookup.insert(format!("{}.{}", parent_field_name, field_name), *pos);
                 });
 
                 for field in fields {
-                    let sub_parent_field_name =
-                        format!("{}.{}", parent_field_name, field.name);
+                    let sub_parent_field_name = format!("{}.{}", parent_field_name, field.name);
                     Self::child_schema_lookup(
                         &sub_parent_field_name,
                         &field.schema,
@@ -138,11 +126,7 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
             }
             AvroSchema::Array(schema) => {
                 let sub_parent_field_name = format!("{}.element", parent_field_name);
-                Self::child_schema_lookup(
-                    &sub_parent_field_name,
-                    &schema.items,
-                    schema_lookup,
-                )?;
+                Self::child_schema_lookup(&sub_parent_field_name, &schema.items, schema_lookup)?;
             }
             _ => (),
         }
@@ -176,8 +160,7 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
 
         let rows = rows.iter().collect::<Vec<&Vec<(String, Value)>>>();
         let projection = self.projection.clone().unwrap_or_default();
-        let arrays =
-            self.build_struct_array(&rows, "", self.schema.fields(), &projection);
+        let arrays = self.build_struct_array(&rows, "", self.schema.fields(), &projection);
         let projected_fields = if projection.is_empty() {
             self.schema.fields().clone()
         } else {
@@ -223,10 +206,7 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
     }
 
     #[inline(always)]
-    fn build_string_dictionary_builder<T>(
-        &self,
-        row_len: usize,
-    ) -> StringDictionaryBuilder<T>
+    fn build_string_dictionary_builder<T>(&self, row_len: usize) -> StringDictionaryBuilder<T>
     where
         T: ArrowPrimitiveType + ArrowDictionaryKeyType,
     {
@@ -241,59 +221,43 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
     ) -> ArrowResult<ArrayRef> {
         match *key_type {
             DataType::Int8 => {
-                let dtype = DataType::Dictionary(
-                    Box::new(DataType::Int8),
-                    Box::new(DataType::Utf8),
-                );
+                let dtype =
+                    DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8));
                 self.list_array_string_array_builder::<Int8Type>(&dtype, col_name, rows)
             }
             DataType::Int16 => {
-                let dtype = DataType::Dictionary(
-                    Box::new(DataType::Int16),
-                    Box::new(DataType::Utf8),
-                );
+                let dtype =
+                    DataType::Dictionary(Box::new(DataType::Int16), Box::new(DataType::Utf8));
                 self.list_array_string_array_builder::<Int16Type>(&dtype, col_name, rows)
             }
             DataType::Int32 => {
-                let dtype = DataType::Dictionary(
-                    Box::new(DataType::Int32),
-                    Box::new(DataType::Utf8),
-                );
+                let dtype =
+                    DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
                 self.list_array_string_array_builder::<Int32Type>(&dtype, col_name, rows)
             }
             DataType::Int64 => {
-                let dtype = DataType::Dictionary(
-                    Box::new(DataType::Int64),
-                    Box::new(DataType::Utf8),
-                );
+                let dtype =
+                    DataType::Dictionary(Box::new(DataType::Int64), Box::new(DataType::Utf8));
                 self.list_array_string_array_builder::<Int64Type>(&dtype, col_name, rows)
             }
             DataType::UInt8 => {
-                let dtype = DataType::Dictionary(
-                    Box::new(DataType::UInt8),
-                    Box::new(DataType::Utf8),
-                );
+                let dtype =
+                    DataType::Dictionary(Box::new(DataType::UInt8), Box::new(DataType::Utf8));
                 self.list_array_string_array_builder::<UInt8Type>(&dtype, col_name, rows)
             }
             DataType::UInt16 => {
-                let dtype = DataType::Dictionary(
-                    Box::new(DataType::UInt16),
-                    Box::new(DataType::Utf8),
-                );
+                let dtype =
+                    DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Utf8));
                 self.list_array_string_array_builder::<UInt16Type>(&dtype, col_name, rows)
             }
             DataType::UInt32 => {
-                let dtype = DataType::Dictionary(
-                    Box::new(DataType::UInt32),
-                    Box::new(DataType::Utf8),
-                );
+                let dtype =
+                    DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8));
                 self.list_array_string_array_builder::<UInt32Type>(&dtype, col_name, rows)
             }
             DataType::UInt64 => {
-                let dtype = DataType::Dictionary(
-                    Box::new(DataType::UInt64),
-                    Box::new(DataType::Utf8),
-                );
+                let dtype =
+                    DataType::Dictionary(Box::new(DataType::UInt64), Box::new(DataType::Utf8));
                 self.list_array_string_array_builder::<UInt64Type>(&dtype, col_name, rows)
             }
             ref e => Err(SchemaError(format!(
@@ -318,8 +282,7 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
                 Box::new(ListBuilder::new(values_builder))
             }
             DataType::Dictionary(_, _) => {
-                let values_builder =
-                    self.build_string_dictionary_builder::<D>(rows.len() * 5);
+                let values_builder = self.build_string_dictionary_builder::<D>(rows.len() * 5);
                 Box::new(ListBuilder::new(values_builder))
             }
             e => {
@@ -400,11 +363,7 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
     }
 
     #[inline(always)]
-    fn build_dictionary_array<T>(
-        &self,
-        rows: RecordSlice,
-        col_name: &str,
-    ) -> ArrowResult<ArrayRef>
+    fn build_dictionary_array<T>(&self, rows: RecordSlice, col_name: &str) -> ArrowResult<ArrayRef>
     where
         T::Native: NumCast,
         T: ArrowPrimitiveType + ArrowDictionaryKeyType,
@@ -436,27 +395,13 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
         if let DataType::Utf8 = *value_type {
             match *key_type {
                 DataType::Int8 => self.build_dictionary_array::<Int8Type>(rows, col_name),
-                DataType::Int16 => {
-                    self.build_dictionary_array::<Int16Type>(rows, col_name)
-                }
-                DataType::Int32 => {
-                    self.build_dictionary_array::<Int32Type>(rows, col_name)
-                }
-                DataType::Int64 => {
-                    self.build_dictionary_array::<Int64Type>(rows, col_name)
-                }
-                DataType::UInt8 => {
-                    self.build_dictionary_array::<UInt8Type>(rows, col_name)
-                }
-                DataType::UInt16 => {
-                    self.build_dictionary_array::<UInt16Type>(rows, col_name)
-                }
-                DataType::UInt32 => {
-                    self.build_dictionary_array::<UInt32Type>(rows, col_name)
-                }
-                DataType::UInt64 => {
-                    self.build_dictionary_array::<UInt64Type>(rows, col_name)
-                }
+                DataType::Int16 => self.build_dictionary_array::<Int16Type>(rows, col_name),
+                DataType::Int32 => self.build_dictionary_array::<Int32Type>(rows, col_name),
+                DataType::Int64 => self.build_dictionary_array::<Int64Type>(rows, col_name),
+                DataType::UInt8 => self.build_dictionary_array::<UInt8Type>(rows, col_name),
+                DataType::UInt16 => self.build_dictionary_array::<UInt16Type>(rows, col_name),
+                DataType::UInt32 => self.build_dictionary_array::<UInt32Type>(rows, col_name),
+                DataType::UInt64 => self.build_dictionary_array::<UInt64Type>(rows, col_name),
                 _ => Err(SchemaError("unsupported dictionary key type".to_string())),
             }
         } else {
@@ -499,8 +444,7 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
             DataType::Boolean => {
                 let num_bytes = bit_util::ceil(valid_len, 8);
                 let mut bool_values = MutableBuffer::from_len_zeroed(num_bytes);
-                let mut bool_nulls =
-                    MutableBuffer::new(num_bytes).with_bitset(num_bytes, true);
+                let mut bool_nulls = MutableBuffer::new(num_bytes).with_bitset(num_bytes, true);
                 let mut curr_index = 0;
                 rows.iter().for_each(|v| {
                     if let Value::Array(vs) = v {
@@ -533,9 +477,7 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
             DataType::UInt16 => self.read_primitive_list_values::<UInt16Type>(rows),
             DataType::UInt32 => self.read_primitive_list_values::<UInt32Type>(rows),
             DataType::UInt64 => self.read_primitive_list_values::<UInt64Type>(rows),
-            DataType::Float16 => {
-                return Err(SchemaError("Float16 not supported".to_string()))
-            }
+            DataType::Float16 => return Err(SchemaError("Float16 not supported".to_string())),
             DataType::Float32 => self.read_primitive_list_values::<Float32Type>(rows),
             DataType::Float64 => self.read_primitive_list_values::<Float64Type>(rows),
             DataType::Timestamp(_, _)
@@ -612,10 +554,8 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
                     })
                     .collect();
 
-                let sub_parent_field_name =
-                    format!("{}.{}", parent_field_name, list_field.name());
-                let arrays =
-                    self.build_struct_array(&rows, &sub_parent_field_name, fields, &[])?;
+                let sub_parent_field_name = format!("{}.{}", parent_field_name, list_field.name());
+                let arrays = self.build_struct_array(&rows, &sub_parent_field_name, fields, &[])?;
                 let data_type = DataType::Struct(fields.clone());
                 ArrayDataBuilder::new(data_type)
                     .len(rows.len())
@@ -674,84 +614,49 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
                     DataType::Float32 => {
                         self.build_primitive_array::<Float32Type>(rows, &field_path)
                     }
-                    DataType::Int64 => {
-                        self.build_primitive_array::<Int64Type>(rows, &field_path)
-                    }
-                    DataType::Int32 => {
-                        self.build_primitive_array::<Int32Type>(rows, &field_path)
-                    }
-                    DataType::Int16 => {
-                        self.build_primitive_array::<Int16Type>(rows, &field_path)
-                    }
-                    DataType::Int8 => {
-                        self.build_primitive_array::<Int8Type>(rows, &field_path)
-                    }
-                    DataType::UInt64 => {
-                        self.build_primitive_array::<UInt64Type>(rows, &field_path)
-                    }
-                    DataType::UInt32 => {
-                        self.build_primitive_array::<UInt32Type>(rows, &field_path)
-                    }
-                    DataType::UInt16 => {
-                        self.build_primitive_array::<UInt16Type>(rows, &field_path)
-                    }
-                    DataType::UInt8 => {
-                        self.build_primitive_array::<UInt8Type>(rows, &field_path)
-                    }
+                    DataType::Int64 => self.build_primitive_array::<Int64Type>(rows, &field_path),
+                    DataType::Int32 => self.build_primitive_array::<Int32Type>(rows, &field_path),
+                    DataType::Int16 => self.build_primitive_array::<Int16Type>(rows, &field_path),
+                    DataType::Int8 => self.build_primitive_array::<Int8Type>(rows, &field_path),
+                    DataType::UInt64 => self.build_primitive_array::<UInt64Type>(rows, &field_path),
+                    DataType::UInt32 => self.build_primitive_array::<UInt32Type>(rows, &field_path),
+                    DataType::UInt16 => self.build_primitive_array::<UInt16Type>(rows, &field_path),
+                    DataType::UInt8 => self.build_primitive_array::<UInt8Type>(rows, &field_path),
                     // TODO: this is incomplete
                     DataType::Timestamp(unit, _) => match unit {
-                        TimeUnit::Second => self
-                            .build_primitive_array::<TimestampSecondType>(
-                                rows,
-                                &field_path,
-                            ),
+                        TimeUnit::Second => {
+                            self.build_primitive_array::<TimestampSecondType>(rows, &field_path)
+                        }
                         TimeUnit::Microsecond => self
-                            .build_primitive_array::<TimestampMicrosecondType>(
-                                rows,
-                                &field_path,
-                            ),
+                            .build_primitive_array::<TimestampMicrosecondType>(rows, &field_path),
                         TimeUnit::Millisecond => self
-                            .build_primitive_array::<TimestampMillisecondType>(
-                                rows,
-                                &field_path,
-                            ),
-                        TimeUnit::Nanosecond => self
-                            .build_primitive_array::<TimestampNanosecondType>(
-                                rows,
-                                &field_path,
-                            ),
-                    },
-                    DataType::Date64 => {
-                        self.build_primitive_array::<Date64Type>(rows, &field_path)
-                    }
-                    DataType::Date32 => {
-                        self.build_primitive_array::<Date32Type>(rows, &field_path)
-                    }
-                    DataType::Time64(unit) => match unit {
-                        TimeUnit::Microsecond => self
-                            .build_primitive_array::<Time64MicrosecondType>(
-                                rows,
-                                &field_path,
-                            ),
-                        TimeUnit::Nanosecond => self
-                            .build_primitive_array::<Time64NanosecondType>(
-                                rows,
-                                &field_path,
-                            ),
-                        t => {
-                            return Err(SchemaError(format!(
-                                "TimeUnit {t:?} not supported with Time64"
-                            )))
+                            .build_primitive_array::<TimestampMillisecondType>(rows, &field_path),
+                        TimeUnit::Nanosecond => {
+                            self.build_primitive_array::<TimestampNanosecondType>(rows, &field_path)
                         }
                     },
+                    DataType::Date64 => self.build_primitive_array::<Date64Type>(rows, &field_path),
+                    DataType::Date32 => self.build_primitive_array::<Date32Type>(rows, &field_path),
+                    DataType::Time64(unit) => {
+                        match unit {
+                            TimeUnit::Microsecond => self
+                                .build_primitive_array::<Time64MicrosecondType>(rows, &field_path),
+                            TimeUnit::Nanosecond => self
+                                .build_primitive_array::<Time64NanosecondType>(rows, &field_path),
+                            t => {
+                                return Err(SchemaError(format!(
+                                    "TimeUnit {t:?} not supported with Time64"
+                                )))
+                            }
+                        }
+                    }
                     DataType::Time32(unit) => match unit {
-                        TimeUnit::Second => self
-                            .build_primitive_array::<Time32SecondType>(rows, &field_path),
-                        TimeUnit::Millisecond => self
-                            .build_primitive_array::<Time32MillisecondType>(
-                                rows,
-                                &field_path,
-                            ),
+                        TimeUnit::Second => {
+                            self.build_primitive_array::<Time32SecondType>(rows, &field_path)
+                        }
+                        TimeUnit::Millisecond => {
+                            self.build_primitive_array::<Time32MillisecondType>(rows, &field_path)
+                        }
                         t => {
                             return Err(SchemaError(format!(
                                 "TimeUnit {t:?} not supported with Time32"
@@ -768,8 +673,7 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
                                 }
                             })
                             .collect::<ArrowResult<StringArray>>()?,
-                    )
-                        as ArrayRef,
+                    ) as ArrayRef,
                     DataType::Binary | DataType::LargeBinary => Arc::new(
                         rows.iter()
                             .map(|row| {
@@ -777,8 +681,7 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
                                 maybe_value.and_then(resolve_bytes)
                             })
                             .collect::<BinaryArray>(),
-                    )
-                        as ArrayRef,
+                    ) as ArrayRef,
                     DataType::FixedSizeBinary(ref size) => {
                         Arc::new(FixedSizeBinaryArray::try_from_sparse_iter_with_size(
                             rows.iter().map(|row| {
@@ -798,8 +701,7 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
                                 let extracted_rows = rows
                                     .iter()
                                     .map(|row| {
-                                        self.field_lookup(&field_path, row)
-                                            .unwrap_or(&Value::Null)
+                                        self.field_lookup(&field_path, row).unwrap_or(&Value::Null)
                                     })
                                     .collect::<Vec<&Value>>();
                                 self.build_nested_list_array::<i32>(
@@ -810,13 +712,9 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
                             }
                         }
                     }
-                    DataType::Dictionary(ref key_ty, ref val_ty) => self
-                        .build_string_dictionary_array(
-                            rows,
-                            &field_path,
-                            key_ty,
-                            val_ty,
-                        )?,
+                    DataType::Dictionary(ref key_ty, ref val_ty) => {
+                        self.build_string_dictionary_array(rows, &field_path, key_ty, val_ty)?
+                    }
                     DataType::Struct(fields) => {
                         let len = rows.len();
                         let num_bytes = bit_util::ceil(len, 8);
@@ -840,12 +738,8 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
                                 }
                             })
                             .collect::<Vec<&Vec<(String, Value)>>>();
-                        let arrays = self.build_struct_array(
-                            &struct_rows,
-                            &field_path,
-                            fields,
-                            &[],
-                        )?;
+                        let arrays =
+                            self.build_struct_array(&struct_rows, &field_path, fields, &[])?;
                         // construct a struct array's data in order to set null buffer
                         let data_type = DataType::Struct(fields.clone());
                         let data = ArrayDataBuilder::new(data_type)
@@ -894,11 +788,7 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
         array.to_data()
     }
 
-    fn field_lookup<'b>(
-        &self,
-        name: &str,
-        row: &'b [(String, Value)],
-    ) -> Option<&'b Value> {
+    fn field_lookup<'b>(&self, name: &str, row: &'b [(String, Value)]) -> Option<&'b Value> {
         self.schema_lookup
             .get(name)
             .and_then(|i| row.get(*i))
@@ -1066,693 +956,5 @@ where
             Value::Null => None,
             _ => unreachable!(),
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::arrow::array::Array;
-    use crate::arrow::datatypes::{Field, TimeUnit};
-    use crate::datasource::avro_to_arrow::{Reader, ReaderBuilder};
-    use arrow::datatypes::DataType;
-    use datafusion_common::assert_batches_eq;
-    use datafusion_common::cast::{
-        as_int32_array, as_int64_array, as_list_array, as_timestamp_microsecond_array,
-    };
-    use std::fs::File;
-    use std::sync::Arc;
-
-    fn build_reader(name: &str, batch_size: usize) -> Reader<File> {
-        let testdata = crate::test_util::arrow_test_data();
-        let filename = format!("{testdata}/avro/{name}");
-        let builder = ReaderBuilder::new()
-            .read_schema()
-            .with_batch_size(batch_size);
-        builder.build(File::open(filename).unwrap()).unwrap()
-    }
-
-    // TODO: Fixed, Enum, Dictionary
-
-    #[test]
-    fn test_time_avro_milliseconds() {
-        let mut reader = build_reader("alltypes_plain.avro", 10);
-        let batch = reader.next().unwrap().unwrap();
-
-        assert_eq!(11, batch.num_columns());
-        assert_eq!(8, batch.num_rows());
-
-        let schema = reader.schema();
-        let batch_schema = batch.schema();
-        assert_eq!(schema, batch_schema);
-
-        let timestamp_col = schema.column_with_name("timestamp_col").unwrap();
-        assert_eq!(
-            &DataType::Timestamp(TimeUnit::Microsecond, None),
-            timestamp_col.1.data_type()
-        );
-        let timestamp_array =
-            as_timestamp_microsecond_array(batch.column(timestamp_col.0)).unwrap();
-        for i in 0..timestamp_array.len() {
-            assert!(timestamp_array.is_valid(i));
-        }
-        assert_eq!(1235865600000000, timestamp_array.value(0));
-        assert_eq!(1235865660000000, timestamp_array.value(1));
-        assert_eq!(1238544000000000, timestamp_array.value(2));
-        assert_eq!(1238544060000000, timestamp_array.value(3));
-        assert_eq!(1233446400000000, timestamp_array.value(4));
-        assert_eq!(1233446460000000, timestamp_array.value(5));
-        assert_eq!(1230768000000000, timestamp_array.value(6));
-        assert_eq!(1230768060000000, timestamp_array.value(7));
-    }
-
-    #[test]
-    fn test_avro_read_list() {
-        let mut reader = build_reader("list_columns.avro", 3);
-        let schema = reader.schema();
-        let (col_id_index, _) = schema.column_with_name("int64_list").unwrap();
-        let batch = reader.next().unwrap().unwrap();
-        assert_eq!(batch.num_columns(), 2);
-        assert_eq!(batch.num_rows(), 3);
-        let a_array = as_list_array(batch.column(col_id_index)).unwrap();
-        assert_eq!(
-            *a_array.data_type(),
-            DataType::List(Arc::new(Field::new("element", DataType::Int64, true)))
-        );
-        let array = a_array.value(0);
-        assert_eq!(*array.data_type(), DataType::Int64);
-
-        assert_eq!(
-            6,
-            as_int64_array(&array)
-                .unwrap()
-                .iter()
-                .flatten()
-                .sum::<i64>()
-        );
-    }
-    #[test]
-    fn test_avro_read_nested_list() {
-        let mut reader = build_reader("nested_lists.snappy.avro", 3);
-        let batch = reader.next().unwrap().unwrap();
-        assert_eq!(batch.num_columns(), 2);
-        assert_eq!(batch.num_rows(), 3);
-    }
-
-    #[test]
-    fn test_complex_list() {
-        let schema = apache_avro::Schema::parse_str(
-            r#"
-            {
-              "type": "record",
-              "name": "r1",
-              "fields": [
-                {
-                  "name": "headers",
-                  "type": ["null", {
-                        "type": "array",
-                        "items": ["null",{
-                            "name":"r2",
-                            "type": "record",
-                            "fields":[
-                                {"name":"name", "type": ["null", "string"], "default": null},
-                                {"name":"value", "type": ["null", "string"], "default": null}
-                            ]
-                        }]
-                    }],
-                    "default": null
-                }
-              ]
-            }"#,
-        )
-        .unwrap();
-        let r1 = apache_avro::to_value(serde_json::json!({
-            "headers": [
-                {
-                    "name": "a",
-                    "value": "b"
-                }
-            ]
-        }))
-        .unwrap()
-        .resolve(&schema)
-        .unwrap();
-
-        let mut w = apache_avro::Writer::new(&schema, vec![]);
-        w.append(r1).unwrap();
-        let bytes = w.into_inner().unwrap();
-
-        let mut reader = ReaderBuilder::new()
-            .read_schema()
-            .with_batch_size(2)
-            .build(std::io::Cursor::new(bytes))
-            .unwrap();
-
-        let batch = reader.next().unwrap().unwrap();
-        assert_eq!(batch.num_rows(), 1);
-        assert_eq!(batch.num_columns(), 1);
-        let expected = [
-            "+-----------------------+",
-            "| headers               |",
-            "+-----------------------+",
-            "| [{name: a, value: b}] |",
-            "+-----------------------+",
-        ];
-        assert_batches_eq!(expected, &[batch]);
-    }
-
-    #[test]
-    fn test_complex_struct() {
-        let schema = apache_avro::Schema::parse_str(
-            r#"
-        {
-          "type": "record",
-          "name": "r1",
-          "fields": [
-            {
-              "name": "dns",
-              "type": [
-                "null",
-                {
-                  "type": "record",
-                  "name": "r13",
-                  "fields": [
-                    {
-                      "name": "answers",
-                      "type": [
-                        "null",
-                        {
-                          "type": "array",
-                          "items": [
-                            "null",
-                            {
-                              "type": "record",
-                              "name": "r292",
-                              "fields": [
-                                {
-                                  "name": "class",
-                                  "type": ["null", "string"],
-                                  "default": null
-                                },
-                                {
-                                  "name": "data",
-                                  "type": ["null", "string"],
-                                  "default": null
-                                },
-                                {
-                                  "name": "name",
-                                  "type": ["null", "string"],
-                                  "default": null
-                                },
-                                {
-                                  "name": "ttl",
-                                  "type": ["null", "long"],
-                                  "default": null
-                                },
-                                {
-                                  "name": "type",
-                                  "type": ["null", "string"],
-                                  "default": null
-                                }
-                              ]
-                            }
-                          ]
-                        }
-                      ],
-                      "default": null
-                    },
-                    {
-                      "name": "header_flags",
-                      "type": [
-                        "null",
-                        {
-                          "type": "array",
-                          "items": ["null", "string"]
-                        }
-                      ],
-                      "default": null
-                    },
-                    {
-                      "name": "id",
-                      "type": ["null", "string"],
-                      "default": null
-                    },
-                    {
-                      "name": "op_code",
-                      "type": ["null", "string"],
-                      "default": null
-                    },
-                    {
-                      "name": "question",
-                      "type": [
-                        "null",
-                        {
-                          "type": "record",
-                          "name": "r288",
-                          "fields": [
-                            {
-                              "name": "class",
-                              "type": ["null", "string"],
-                              "default": null
-                            },
-                            {
-                              "name": "name",
-                              "type": ["null", "string"],
-                              "default": null
-                            },
-                            {
-                              "name": "registered_domain",
-                              "type": ["null", "string"],
-                              "default": null
-                            },
-                            {
-                              "name": "subdomain",
-                              "type": ["null", "string"],
-                              "default": null
-                            },
-                            {
-                              "name": "top_level_domain",
-                              "type": ["null", "string"],
-                              "default": null
-                            },
-                            {
-                              "name": "type",
-                              "type": ["null", "string"],
-                              "default": null
-                            }
-                          ]
-                        }
-                      ],
-                      "default": null
-                    },
-                    {
-                      "name": "resolved_ip",
-                      "type": [
-                        "null",
-                        {
-                          "type": "array",
-                          "items": ["null", "string"]
-                        }
-                      ],
-                      "default": null
-                    },
-                    {
-                      "name": "response_code",
-                      "type": ["null", "string"],
-                      "default": null
-                    },
-                    {
-                      "name": "type",
-                      "type": ["null", "string"],
-                      "default": null
-                    }
-                  ]
-                }
-              ],
-              "default": null
-            }
-          ]
-        }"#,
-        )
-        .unwrap();
-
-        let jv1 = serde_json::json!({
-          "dns": {
-            "answers": [
-                {
-                    "data": "CHNlY3VyaXR5BnVidW50dQMjb20AAAEAAQAAAAgABLl9vic=",
-                    "type": "1"
-                },
-                {
-                    "data": "CHNlY3VyaXR5BnVidW50dQNjb20AAAEAABAAAAgABLl9viQ=",
-                    "type": "1"
-                },
-                {
-                    "data": "CHNlT3VyaXR5BnVidW50dQNjb20AAAEAAQAAAAgABFu9Wyc=",
-                    "type": "1"
-                }
-            ],
-            "question": {
-                "name": "security.ubuntu.com",
-                "type": "A"
-            },
-            "resolved_ip": [
-                "67.43.156.1",
-                "67.43.156.2",
-                "67.43.156.3"
-            ],
-            "response_code": "0"
-          }
-        });
-        let r1 = apache_avro::to_value(jv1)
-            .unwrap()
-            .resolve(&schema)
-            .unwrap();
-
-        let mut w = apache_avro::Writer::new(&schema, vec![]);
-        w.append(r1).unwrap();
-        let bytes = w.into_inner().unwrap();
-
-        let mut reader = ReaderBuilder::new()
-            .read_schema()
-            .with_batch_size(1)
-            .build(std::io::Cursor::new(bytes))
-            .unwrap();
-
-        let batch = reader.next().unwrap().unwrap();
-        assert_eq!(batch.num_rows(), 1);
-        assert_eq!(batch.num_columns(), 1);
-
-        let expected = [
-            "+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
-            "| dns                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |",
-            "+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
-            "| {answers: [{class: , data: CHNlY3VyaXR5BnVidW50dQMjb20AAAEAAQAAAAgABLl9vic=, name: , ttl: , type: 1}, {class: , data: CHNlY3VyaXR5BnVidW50dQNjb20AAAEAABAAAAgABLl9viQ=, name: , ttl: , type: 1}, {class: , data: CHNlT3VyaXR5BnVidW50dQNjb20AAAEAAQAAAAgABFu9Wyc=, name: , ttl: , type: 1}], header_flags: , id: , op_code: , question: {class: , name: security.ubuntu.com, registered_domain: , subdomain: , top_level_domain: , type: A}, resolved_ip: [67.43.156.1, 67.43.156.2, 67.43.156.3], response_code: 0, type: } |",
-            "+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
-        ];
-        assert_batches_eq!(expected, &[batch]);
-    }
-
-    #[test]
-    fn test_deep_nullable_struct() {
-        let schema = apache_avro::Schema::parse_str(
-            r#"
-            {
-                "type": "record",
-                "name": "r1",
-                "fields": [
-                  {
-                    "name": "col1",
-                    "type": [
-                      "null",
-                      {
-                        "type": "record",
-                        "name": "r2",
-                        "fields": [
-                          {
-                            "name": "col2",
-                            "type": [
-                              "null",
-                              {
-                                "type": "record",
-                                "name": "r3",
-                                "fields": [
-                                  {
-                                    "name": "col3",
-                                    "type": [
-                                      "null",
-                                      {
-                                        "type": "record",
-                                        "name": "r4",
-                                        "fields": [
-                                          {
-                                            "name": "col4",
-                                            "type": [
-                                              "null",
-                                              {
-                                                "type": "record",
-                                                "name": "r5",
-                                                "fields": [
-                                                  {
-                                                    "name": "col5",
-                                                    "type": ["null", "string"]
-                                                  }
-                                                ]
-                                              }
-                                            ]
-                                          }
-                                        ]
-                                      }
-                                    ]
-                                  }
-                                ]
-                              }
-                            ]
-                          }
-                        ]
-                      }
-                    ]
-                  }
-                ]
-              }
-            "#,
-        )
-        .unwrap();
-        let r1 = apache_avro::to_value(serde_json::json!({
-            "col1": {
-                "col2": {
-                    "col3": {
-                        "col4": {
-                            "col5": "hello"
-                        }
-                    }
-                }
-            }
-        }))
-        .unwrap()
-        .resolve(&schema)
-        .unwrap();
-        let r2 = apache_avro::to_value(serde_json::json!({
-            "col1": {
-                "col2": {
-                    "col3": {
-                        "col4": {
-                            "col5": null
-                        }
-                    }
-                }
-            }
-        }))
-        .unwrap()
-        .resolve(&schema)
-        .unwrap();
-        let r3 = apache_avro::to_value(serde_json::json!({
-            "col1": {
-                "col2": {
-                    "col3": null
-                }
-            }
-        }))
-        .unwrap()
-        .resolve(&schema)
-        .unwrap();
-        let r4 = apache_avro::to_value(serde_json::json!({ "col1": null }))
-            .unwrap()
-            .resolve(&schema)
-            .unwrap();
-
-        let mut w = apache_avro::Writer::new(&schema, vec![]);
-        w.append(r1).unwrap();
-        w.append(r2).unwrap();
-        w.append(r3).unwrap();
-        w.append(r4).unwrap();
-        let bytes = w.into_inner().unwrap();
-
-        let mut reader = ReaderBuilder::new()
-            .read_schema()
-            .with_batch_size(4)
-            .build(std::io::Cursor::new(bytes))
-            .unwrap();
-
-        let batch = reader.next().unwrap().unwrap();
-
-        let expected = [
-            "+---------------------------------------+",
-            "| col1                                  |",
-            "+---------------------------------------+",
-            "| {col2: {col3: {col4: {col5: hello}}}} |",
-            "| {col2: {col3: {col4: {col5: }}}}      |",
-            "| {col2: {col3: }}                      |",
-            "|                                       |",
-            "+---------------------------------------+",
-        ];
-        assert_batches_eq!(expected, &[batch]);
-    }
-
-    #[test]
-    fn test_avro_nullable_struct() {
-        let schema = apache_avro::Schema::parse_str(
-            r#"
-            {
-              "type": "record",
-              "name": "r1",
-              "fields": [
-                {
-                  "name": "col1",
-                  "type": [
-                    "null",
-                    {
-                      "type": "record",
-                      "name": "r2",
-                      "fields": [
-                        {
-                          "name": "col2",
-                          "type": ["null", "string"]
-                        }
-                      ]
-                    }
-                  ],
-                  "default": null
-                }
-              ]
-            }"#,
-        )
-        .unwrap();
-        let r1 = apache_avro::to_value(serde_json::json!({ "col1": null }))
-            .unwrap()
-            .resolve(&schema)
-            .unwrap();
-        let r2 = apache_avro::to_value(serde_json::json!({
-            "col1": {
-                "col2": "hello"
-            }
-        }))
-        .unwrap()
-        .resolve(&schema)
-        .unwrap();
-        let r3 = apache_avro::to_value(serde_json::json!({
-            "col1": {
-                "col2": null
-            }
-        }))
-        .unwrap()
-        .resolve(&schema)
-        .unwrap();
-
-        let mut w = apache_avro::Writer::new(&schema, vec![]);
-        w.append(r1).unwrap();
-        w.append(r2).unwrap();
-        w.append(r3).unwrap();
-        let bytes = w.into_inner().unwrap();
-
-        let mut reader = ReaderBuilder::new()
-            .read_schema()
-            .with_batch_size(3)
-            .build(std::io::Cursor::new(bytes))
-            .unwrap();
-        let batch = reader.next().unwrap().unwrap();
-        assert_eq!(batch.num_rows(), 3);
-        assert_eq!(batch.num_columns(), 1);
-
-        let expected = [
-            "+---------------+",
-            "| col1          |",
-            "+---------------+",
-            "|               |",
-            "| {col2: hello} |",
-            "| {col2: }      |",
-            "+---------------+",
-        ];
-        assert_batches_eq!(expected, &[batch]);
-    }
-
-    #[test]
-    fn test_avro_nullable_struct_array() {
-        let schema = apache_avro::Schema::parse_str(
-            r#"
-            {
-              "type": "record",
-              "name": "r1",
-              "fields": [
-                {
-                  "name": "col1",
-                  "type": [
-                    "null",
-                    {
-                        "type": "array",
-                        "items": {
-                            "type": [
-                                "null",
-                                {
-                                    "type": "record",
-                                    "name": "Item",
-                                    "fields": [
-                                        {
-                                            "name": "id",
-                                            "type": "long"
-                                        }
-                                    ]
-                                }
-                            ]
-                        }
-                    }
-                  ],
-                  "default": null
-                }
-              ]
-            }"#,
-        )
-        .unwrap();
-        let jv1 = serde_json::json!({
-            "col1": [
-                {
-                    "id": 234
-                },
-                {
-                    "id": 345
-                }
-            ]
-        });
-        let r1 = apache_avro::to_value(jv1)
-            .unwrap()
-            .resolve(&schema)
-            .unwrap();
-        let r2 = apache_avro::to_value(serde_json::json!({ "col1": null }))
-            .unwrap()
-            .resolve(&schema)
-            .unwrap();
-
-        let mut w = apache_avro::Writer::new(&schema, vec![]);
-        for _i in 0..5 {
-            w.append(r1.clone()).unwrap();
-        }
-        w.append(r2).unwrap();
-        let bytes = w.into_inner().unwrap();
-
-        let mut reader = ReaderBuilder::new()
-            .read_schema()
-            .with_batch_size(20)
-            .build(std::io::Cursor::new(bytes))
-            .unwrap();
-        let batch = reader.next().unwrap().unwrap();
-        assert_eq!(batch.num_rows(), 6);
-        assert_eq!(batch.num_columns(), 1);
-
-        let expected = [
-            "+------------------------+",
-            "| col1                   |",
-            "+------------------------+",
-            "| [{id: 234}, {id: 345}] |",
-            "| [{id: 234}, {id: 345}] |",
-            "| [{id: 234}, {id: 345}] |",
-            "| [{id: 234}, {id: 345}] |",
-            "| [{id: 234}, {id: 345}] |",
-            "|                        |",
-            "+------------------------+",
-        ];
-        assert_batches_eq!(expected, &[batch]);
-    }
-
-    #[test]
-    fn test_avro_iterator() {
-        let reader = build_reader("alltypes_plain.avro", 5);
-        let schema = reader.schema();
-        let (col_id_index, _) = schema.column_with_name("id").unwrap();
-
-        let mut sum_num_rows = 0;
-        let mut num_batches = 0;
-        let mut sum_id = 0;
-        for batch in reader {
-            let batch = batch.unwrap();
-            assert_eq!(11, batch.num_columns());
-            sum_num_rows += batch.num_rows();
-            num_batches += 1;
-            let batch_schema = batch.schema();
-            assert_eq!(schema, batch_schema);
-            let a_array = as_int32_array(batch.column(col_id_index)).unwrap();
-            sum_id += (0..a_array.len()).map(|i| a_array.value(i)).sum::<i32>();
-        }
-        assert_eq!(8, sum_num_rows);
-        assert_eq!(2, num_batches);
-        assert_eq!(28, sum_id);
     }
 }
