@@ -21,13 +21,12 @@
 
 #![allow(warnings, clippy::all)]
 
-mod arrow_array_reader;
-mod reader;
+pub mod arrow_array_reader;
+pub mod avro_datum_reader;
 mod schema;
 
 use crate::error::Result;
 use arrow::datatypes::Schema;
-pub use reader::{Reader, ReaderBuilder};
 pub use schema::to_arrow_schema;
 use std::io::Read;
 

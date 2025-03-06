@@ -17,6 +17,8 @@
 
 //! Avro to Arrow array readers
 
+use crate::avro_to_arrow::avro_datum_reader::AvroDatumReader;
+use crate::avro_to_arrow::to_arrow_schema;
 use crate::error::{CoreError, Result};
 use apache_avro::schema::RecordSchema;
 use apache_avro::{
@@ -52,17 +54,21 @@ use std::sync::Arc;
 type RecordSlice<'a> = &'a [&'a Vec<(String, Value)>];
 
 pub struct AvroArrowArrayReader<'a, R: Read> {
-    reader: AvroReader<'a, R>,
-    schema: SchemaRef,
+    reader: AvroDatumReader<'a, R>,
+    schema: Schema,
     projection: Option<Vec<String>>,
     schema_lookup: BTreeMap<String, usize>,
 }
 
-impl<R: Read> AvroArrowArrayReader<'_, R> {
-    pub fn try_new(reader: R, schema: SchemaRef, projection: Option<Vec<String>>) -> Result<Self> {
-        let reader = AvroReader::new(reader)?;
-        let writer_schema = reader.writer_schema().clone();
-        let schema_lookup = Self::schema_lookup(writer_schema)?;
+impl<'a, R: Read> AvroArrowArrayReader<'a, R> {
+    pub fn try_new(
+        reader: R,
+        writer_schema: &'a AvroSchema,
+        projection: Option<Vec<String>>,
+    ) -> Result<Self> {
+        let reader = AvroDatumReader::new(reader, writer_schema, None);
+        let schema = to_arrow_schema(writer_schema)?;
+        let schema_lookup = Self::schema_lookup(writer_schema.clone())?;
         Ok(Self {
             reader,
             schema,
@@ -134,21 +140,22 @@ impl<R: Read> AvroArrowArrayReader<'_, R> {
     }
 
     /// Read the next batch of records
-    pub fn next_batch(&mut self, batch_size: usize) -> Option<ArrowResult<RecordBatch>> {
-        let rows_result = self
-            .reader
-            .by_ref()
-            .take(batch_size)
-            .map(|value| match value {
-                Ok(Value::Record(v)) => Ok(v),
-                Err(e) => Err(ArrowError::ParseError(format!(
-                    "Failed to parse avro value: {e:?}"
-                ))),
-                other => Err(ArrowError::ParseError(format!(
-                    "Row needs to be of type object, got: {other:?}"
-                ))),
+    pub fn next_batch(&mut self, values: &[Value]) -> Option<ArrowResult<RecordBatch>> {
+        let rows_result = values
+            .iter()
+            .cloned()
+            .map(|value| {
+                println!("mapping value {:?}", value);
+                match value {
+                    Value::Record(v) => Ok(v),
+                    other => Err(ArrowError::ParseError(format!(
+                        "Row needs to be of type object, got: {other:?}"
+                    ))),
+                }
             })
             .collect::<ArrowResult<Vec<Vec<(String, Value)>>>>();
+
+        println!("rows_result: {:?}", rows_result);
 
         let rows = match rows_result {
             // Return error early

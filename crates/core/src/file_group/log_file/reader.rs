@@ -258,7 +258,7 @@ impl<R: Read + Seek> LogFileReader<R> {
             // TODO skip reading block
         }
         let content = self.read_content(&format_version, block_length)?;
-        let record_batches = LogBlock::decode_content(&block_type, content)?;
+        let record_batches = LogBlock::decode_content(&block_type, &header, content)?;
         let footer = self.read_block_metadata(BlockMetadataType::Footer, &format_version)?;
         let _ = self.read_total_block_length(&format_version)?;
 
@@ -280,6 +280,14 @@ mod tests {
     use crate::storage::util::parse_uri;
     use std::fs::canonicalize;
     use std::path::PathBuf;
+
+    fn get_valid_log_avro_delete() -> (String, String) {
+        let dir = PathBuf::from("tests/data/log_files/valid_log_avro_delete");
+        (
+            canonicalize(dir).unwrap().to_str().unwrap().to_string(),
+            ".74e73b70-d681-4b27-9389-5c41d77897fe-0_20250209014234708.log.2_0-145-201".to_string(),
+        )
+    }
 
     fn get_valid_log_parquet() -> (String, String) {
         let dir = PathBuf::from("tests/data/log_files/valid_log_parquet");
@@ -305,6 +313,17 @@ mod tests {
         let hudi_configs = Arc::new(HudiConfigs::empty());
         let storage = Storage::new_with_base_url(dir_url)?;
         LogFileReader::new(hudi_configs, storage, file_name).await
+    }
+
+    #[tokio::test]
+    async fn test_read_log_file_with_avro_delete_block() -> Result<()> {
+        let (dir, file_name) = get_valid_log_avro_delete();
+        let mut reader = create_log_file_reader(&dir, &file_name).await?;
+        let instant_range = InstantRange::up_to("20250209014243389", "utc");
+        let blocks = reader.read_all_blocks(&instant_range)?;
+        assert_eq!(blocks.len(), 1);
+
+        Ok(())
     }
 
     #[tokio::test]
