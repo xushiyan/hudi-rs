@@ -17,14 +17,13 @@
 
 //! Avro to Arrow array readers
 
-use crate::avro_to_arrow::avro_datum_reader::AvroDatumReader;
 use crate::avro_to_arrow::to_arrow_schema;
 use crate::error::{CoreError, Result};
 use apache_avro::schema::RecordSchema;
 use apache_avro::{
     schema::{Schema as AvroSchema, SchemaKind},
     types::Value,
-    AvroResult, Error as AvroError, Reader as AvroReader,
+    AvroResult, Error as AvroError,
 };
 use arrow::array::{
     make_array, Array, ArrayBuilder, ArrayData, ArrayDataBuilder, ArrayRef, BooleanBuilder,
@@ -33,6 +32,7 @@ use arrow::array::{
 };
 use arrow::array::{BinaryArray, FixedSizeBinaryArray, GenericListArray};
 use arrow::buffer::{Buffer, MutableBuffer};
+use arrow::datatypes::Fields;
 use arrow::datatypes::{
     ArrowDictionaryKeyType, ArrowNumericType, ArrowPrimitiveType, DataType, Date32Type, Date64Type,
     Field, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, Schema,
@@ -40,7 +40,6 @@ use arrow::datatypes::{
     TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
-use arrow::datatypes::{Fields, SchemaRef};
 use arrow::error::ArrowError;
 use arrow::error::ArrowError::SchemaError;
 use arrow::error::Result as ArrowResult;
@@ -48,29 +47,34 @@ use arrow::record_batch::RecordBatch;
 use arrow::util::bit_util;
 use num_traits::NumCast;
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::sync::Arc;
 
 type RecordSlice<'a> = &'a [&'a Vec<(String, Value)>];
 
-pub struct AvroArrowArrayReader<'a, R: Read> {
-    reader: AvroDatumReader<'a, R>,
+pub struct AvroArrowArrayReader<I: Iterator<Item = Value>> {
+    values: I,
     schema: Schema,
     projection: Option<Vec<String>>,
     schema_lookup: BTreeMap<String, usize>,
 }
 
-impl<'a, R: Read> AvroArrowArrayReader<'a, R> {
+impl<I: Iterator<Item = Value>> AvroArrowArrayReader<I> {
+    /// Create a new Avro to Arrow array reader.
+    ///
+    /// # Arguments
+    ///
+    /// * `values_iter` - Iterator that returns Avro values
+    /// * `writer_schema` - The writer schema for each Avro value (record)
+    /// * `projection` - The fields to project
     pub fn try_new(
-        reader: R,
-        writer_schema: &'a AvroSchema,
+        values: I,
+        writer_schema: &AvroSchema,
         projection: Option<Vec<String>>,
     ) -> Result<Self> {
-        let reader = AvroDatumReader::new(reader, writer_schema, None);
         let schema = to_arrow_schema(writer_schema)?;
         let schema_lookup = Self::schema_lookup(writer_schema.clone())?;
         Ok(Self {
-            reader,
+            values,
             schema,
             projection,
             schema_lookup,
@@ -140,22 +144,18 @@ impl<'a, R: Read> AvroArrowArrayReader<'a, R> {
     }
 
     /// Read the next batch of records
-    pub fn next_batch(&mut self, values: &[Value]) -> Option<ArrowResult<RecordBatch>> {
-        let rows_result = values
-            .iter()
-            .cloned()
-            .map(|value| {
-                println!("mapping value {:?}", value);
-                match value {
-                    Value::Record(v) => Ok(v),
-                    other => Err(ArrowError::ParseError(format!(
-                        "Row needs to be of type object, got: {other:?}"
-                    ))),
-                }
+    pub fn next_batch(&mut self, batch_size: usize) -> Option<ArrowResult<RecordBatch>> {
+        let rows_result = self
+            .values
+            .by_ref()
+            .take(batch_size)
+            .map(|value| match value {
+                Value::Record(v) => Ok(v),
+                other => Err(ArrowError::ParseError(format!(
+                    "Row needs to be of type object, got: {other:?}"
+                ))),
             })
             .collect::<ArrowResult<Vec<Vec<(String, Value)>>>>();
-
-        println!("rows_result: {:?}", rows_result);
 
         let rows = match rows_result {
             // Return error early

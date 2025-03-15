@@ -21,17 +21,8 @@ use crate::error::CoreError;
 use crate::file_group::log_file::log_format::LogFormatVersion;
 use crate::Result;
 use arrow_array::RecordBatch;
-use bytes::Bytes;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use std::collections::HashMap;
-use std::io::{BufReader, Cursor, Read, Seek};
 use std::str::FromStr;
-use apache_avro::schema::Schema as AvroSchema;
-use apache_avro::types::Value;
-use crate::avro_to_arrow::arrow_array_reader::AvroArrowArrayReader;
-use crate::avro_to_arrow::avro_datum_reader;
-use crate::avro_to_arrow::avro_datum_reader::AvroDatumReader;
-use crate::schema::{schema_for_delete_record, schema_for_delete_record_list};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -170,83 +161,6 @@ pub struct LogBlock {
 }
 
 impl LogBlock {
-    pub fn decode_content(block_type: &BlockType, header: &HashMap<BlockMetadataKey, String>,  content: Vec<u8>) -> Result<Vec<RecordBatch>> {
-        match block_type {
-            BlockType::Delete => {
-                let delete_record_schema = schema_for_delete_record()?;
-
-                let writer_schema = schema_for_delete_record_list()?;
-                println!("writer_schema: {:?}", writer_schema);
-                let bytes = Bytes::from(content);
-                let mut reader = BufReader::with_capacity(bytes.len(), Cursor::new(bytes));
-                println!("content length: {:?}", reader.capacity());
-
-                let mut format_version = [0u8; 4];
-                reader.read_exact(&mut format_version)?;
-                let format_version = u32::from_be_bytes(format_version);
-                println!("format_version: {:?}", format_version);
-
-                let mut length = [0u8; 4];
-                reader.read_exact(&mut length)?;
-                let length = u32::from_be_bytes(length);
-                println!("length: {:?}", length);
-
-                println!("curr pos: {:?}", reader.stream_position());
-
-                let mut avro_datum_reader = AvroDatumReader::new(reader, &writer_schema, None);
-                if let Some(avro_datum) = avro_datum_reader.next() {
-                    let delete_record_list = avro_datum?;
-                    println!("delete_record_list: {:?}", delete_record_list);
-                    match delete_record_list {
-                        Value::Record(v) => {
-                            assert_eq!(v.len(), 1);
-
-                            let (_, delete_record_list) = v.get(0).unwrap();
-                            match delete_record_list {
-                                Value::Array(v) => {
-                                    println!("delete_record_list: {:?}", v);
-
-                                    let bytes = Bytes::from(vec![0u8; 0]);
-                                    let mut content_reader = BufReader::with_capacity(bytes.len(), Cursor::new(bytes));
-                                    let mut avro_arrow_array_reader = AvroArrowArrayReader::try_new(content_reader, &delete_record_schema, None)?;
-                                    let batch = avro_arrow_array_reader.next_batch(v.as_ref()).unwrap()?;
-
-                                    print!("batch: {:?}", batch);
-                                },
-                                _ => {
-                                    return Err(CoreError::LogBlockError(format!(
-                                        "Invalid delete record list: {delete_record_list:?}"
-                                    )));
-                                }
-                            }
-                        },
-                        _ => {
-                            return Err(CoreError::LogBlockError(format!(
-                                "Invalid delete record list: {delete_record_list:?}"
-                            )));
-                        }
-                    }
-                }
-
-                Ok(Vec::new())
-            },
-            BlockType::ParquetData => {
-                let record_bytes = Bytes::from(content);
-                let parquet_reader = ParquetRecordBatchReader::try_new(record_bytes, 1024)?;
-                let mut batches = Vec::new();
-                for item in parquet_reader {
-                    let batch = item.map_err(CoreError::ArrowError)?;
-                    batches.push(batch);
-                }
-                Ok(batches)
-            }
-            BlockType::Command => Ok(Vec::new()),
-            _ => Err(CoreError::LogBlockError(format!(
-                "Unsupported block type: {block_type:?}"
-            ))),
-        }
-    }
-
     pub fn instant_time(&self) -> Result<&str> {
         let v = self
             .header
@@ -301,10 +215,6 @@ impl LogBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{ArrayRef, Int64Array, StringArray};
-    use arrow_schema::{DataType, Field, Schema};
-    use parquet::arrow::ArrowWriter;
-    use std::sync::Arc;
 
     #[test]
     fn test_block_type_as_ref() {
@@ -408,42 +318,6 @@ mod tests {
 
         // Test invalid metadata key
         assert!(BlockMetadataKey::try_from([0, 0, 0, 7]).is_err());
-    }
-
-    #[test]
-    fn test_decode_parquet_content() -> Result<()> {
-        // Create sample parquet bytes
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-            Field::new("name", DataType::Utf8, false),
-        ]));
-
-        let ids = Int64Array::from(vec![1, 2, 3]);
-        let names = StringArray::from(vec!["a", "b", "c"]);
-
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(ids) as ArrayRef, Arc::new(names) as ArrayRef],
-        )?;
-
-        let mut buf = Vec::new();
-        {
-            let mut writer = ArrowWriter::try_new(&mut buf, schema, None)?;
-            writer.write(&batch)?;
-            writer.close()?;
-        }
-
-        let empty_header = HashMap::new();
-
-        // Test decoding the parquet content
-        let batches = LogBlock::decode_content(&BlockType::ParquetData, &empty_header, buf)?;
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].num_rows(), 3);
-
-        // Test decoding with unsupported block type
-        assert!(LogBlock::decode_content(&BlockType::AvroData, &empty_header, vec![]).is_err());
-
-        Ok(())
     }
 
     #[test]

@@ -22,7 +22,6 @@
 #![allow(warnings, clippy::all)]
 
 pub mod arrow_array_reader;
-pub mod avro_datum_reader;
 mod schema;
 
 use crate::error::Result;

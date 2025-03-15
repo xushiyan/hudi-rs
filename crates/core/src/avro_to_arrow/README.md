@@ -18,11 +18,13 @@
 -->
 
 > [!NOTE]
-> This module is taken from [Apache DataFusion](https://github.com/apache/datafusion/tree/45.0.0/datafusion/core/src/datasource/avro_to_arrow)
+> This module is taken
+> from [Apache DataFusion](https://github.com/apache/datafusion/tree/45.0.0/datafusion/core/src/datasource/avro_to_arrow)
 > and modified to work with Hudi Avro log block. The original code is licensed under the Apache License, Version 2.0.
 
 ## Notable Changes
 
+- Removed `reader.rs`.
 - Original tests are removed.
 - DataFusion errors are replaced with Hudi errors.
-- Added `avro_datum_reader` module to read Avro records from a block.
+- Adjust `AvroArrowArrayReader` to work with Iterator of Avro Values.
