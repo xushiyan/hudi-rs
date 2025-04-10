@@ -2,7 +2,7 @@
 #include <vector>
 #include <memory>
 #include "rust/cxx.h"
-#include "hudi-cpp/src/bridge.rs.h"  // Generated header from cxx
+#include "hudi/src/bridge.rs.h"  // Generated header from cxx
 #include "arrow/c/api.h"  // Arrow C Data Interface
 
 // Utility function to print ArrowArray data

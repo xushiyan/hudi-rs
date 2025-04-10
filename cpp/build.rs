@@ -1,10 +1,12 @@
-// build.rs
+use cxx_build::CFG;
 fn main() {
+    CFG.include_prefix = "hudi";
+
     cxx_build::bridge("src/bridge.rs")
         .include("include")
         .include("include/arrow/c")
         .flag_if_supported("-std=c++14")
-        .compile("hudi_cpp");
+        .compile("hudi");
 
     println!("cargo:rerun-if-changed=src/bridge.rs");
     println!("cargo:rerun-if-changed=include/arrow_bridge.h");

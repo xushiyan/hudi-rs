@@ -28,6 +28,7 @@ homepage.workspace = true
 repository = "https://github.com/apache/hudi-rs/tree/main/cpp/"
 
 [lib]
+name = "hudi"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

@@ -13,7 +13,7 @@ string(JSON CARGO_WORKSPACE_ROOT GET ${CARGO_METADATA} "workspace_root")
 string(JSON TARGET_DIRECTORY GET ${CARGO_METADATA} "target_directory")
 
 # Get generated C++ code location
-set(CXX_GENERATED_DIR "${TARGET_DIRECTORY}/cxxbridge/hudi-cpp/src")
+set(CXX_GENERATED_DIR "${TARGET_DIRECTORY}/cxxbridge/hudi/src")
 
 # Include directories
 include_directories(${CARGO_WORKSPACE_ROOT}/cpp/include)
@@ -27,20 +27,20 @@ add_executable(hudi_cpp_example
 
 # Link with the Rust library
 if(WIN32)
-    target_link_libraries(hudi_cpp_example ${TARGET_DIRECTORY}/debug/hudi_cpp.lib)
+    target_link_libraries(hudi_cpp_example ${TARGET_DIRECTORY}/debug/hudi.lib)
 elseif(APPLE)
-    target_link_libraries(hudi_cpp_example ${TARGET_DIRECTORY}/debug/libhudi_cpp.dylib)
+    target_link_libraries(hudi_cpp_example ${TARGET_DIRECTORY}/debug/libhudi.dylib)
 else()
-    target_link_libraries(hudi_cpp_example ${TARGET_DIRECTORY}/debug/libhudi_cpp.so)
+    target_link_libraries(hudi_cpp_example ${TARGET_DIRECTORY}/debug/libhudi.so)
 endif()
 
 # Add a custom command to build the Rust library
 if(WIN32)
-    set(RUST_LIB_PATH ${TARGET_DIRECTORY}/debug/hudi_cpp.lib)
+    set(RUST_LIB_PATH ${TARGET_DIRECTORY}/debug/hudi.lib)
 elseif(APPLE)
-    set(RUST_LIB_PATH ${TARGET_DIRECTORY}/debug/libhudi_cpp.dylib)
+    set(RUST_LIB_PATH ${TARGET_DIRECTORY}/debug/libhudi.dylib)
 else()
-    set(RUST_LIB_PATH ${TARGET_DIRECTORY}/debug/libhudi_cpp.so)
+    set(RUST_LIB_PATH ${TARGET_DIRECTORY}/debug/libhudi.so)
 endif()
 
 add_custom_command(
