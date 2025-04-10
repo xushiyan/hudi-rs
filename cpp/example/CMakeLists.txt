@@ -1,58 +1,29 @@
-cmake_minimum_required(VERSION 3.12)
-project(hudi_cpp_example)
+cmake_minimum_required(VERSION 3.28)
+project(hudi_cpp_examples)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find the hudi-cpp lib
-execute_process(
-    COMMAND cargo metadata --format-version=1
-    OUTPUT_VARIABLE CARGO_METADATA
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../..
-)
-string(JSON CARGO_WORKSPACE_ROOT GET ${CARGO_METADATA} "workspace_root")
-string(JSON TARGET_DIRECTORY GET ${CARGO_METADATA} "target_directory")
+# Find the installed hudi library
+find_library(HUDI_LIBRARY hudi REQUIRED)
 
-# Get generated C++ code location
-set(CXX_GENERATED_DIR "${TARGET_DIRECTORY}/cxxbridge/hudi/src")
+# Set the include directories directly to match the installation layout
+set(HUDI_INCLUDE_DIR "/usr/local/include")
 
-# Include directories
-include_directories(${CARGO_WORKSPACE_ROOT}/cpp/include)
-include_directories(${TARGET_DIRECTORY}/cxxbridge)
-
-# Add the example executable and generated code
+# Add the example executable
 add_executable(hudi_cpp_example
-    example.cpp
-    ${CXX_GENERATED_DIR}/bridge.rs.cc
+  example.cpp
+  ${HUDI_INCLUDE_DIR}/hudi/src/bridge.rs.cc
 )
 
-# Link with the Rust library
-if(WIN32)
-    target_link_libraries(hudi_cpp_example ${TARGET_DIRECTORY}/debug/hudi.lib)
-elseif(APPLE)
-    target_link_libraries(hudi_cpp_example ${TARGET_DIRECTORY}/debug/libhudi.dylib)
-else()
-    target_link_libraries(hudi_cpp_example ${TARGET_DIRECTORY}/debug/libhudi.so)
-endif()
-
-# Add a custom command to build the Rust library
-if(WIN32)
-    set(RUST_LIB_PATH ${TARGET_DIRECTORY}/debug/hudi.lib)
-elseif(APPLE)
-    set(RUST_LIB_PATH ${TARGET_DIRECTORY}/debug/libhudi.dylib)
-else()
-    set(RUST_LIB_PATH ${TARGET_DIRECTORY}/debug/libhudi.so)
-endif()
-
-add_custom_command(
-    OUTPUT ${RUST_LIB_PATH}
-    COMMAND cargo build
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..
-    COMMENT "Building Rust library"
+# The header paths need to be adjusted to match how they were installed
+target_include_directories(hudi_cpp_example PRIVATE
+  ${HUDI_INCLUDE_DIR}/hudi
+  ${HUDI_INCLUDE_DIR}/rust
 )
 
-# Add a custom target that depends on the Rust library
-add_custom_target(
-    rust_lib ALL
-    DEPENDS ${RUST_LIB_PATH}
-)
-add_dependencies(hudi_cpp_example rust_lib)
+target_link_libraries(hudi_cpp_example ${HUDI_LIBRARY})
+
+# Output configuration
+message(STATUS "Using HUDI_LIBRARY: ${HUDI_LIBRARY}")
+message(STATUS "Using HUDI_INCLUDE_DIR: ${HUDI_INCLUDE_DIR}")
