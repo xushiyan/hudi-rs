@@ -1,8 +1,5 @@
-// src/bridge.rs
-use arrow::array::RecordBatch;
-use arrow_array::Int32Array;
-use arrow_schema::{DataType, Field, Schema};
-use std::sync::Arc;
+use hudi::table::Table;
+use hudi_test::QuickstartTripsTable;
 
 #[cxx::bridge]
 mod ffi {
@@ -24,12 +21,11 @@ mod ffi {
 }
 
 pub fn read_file_slice() -> Vec<ffi::ArrowRecordBatch> {
-    // Create a simple Int32Array with values [1, 2, 3]
-    let schema = Arc::new(Schema::new(vec![Field::new("col", DataType::Int32, false)]));
-    let array = Arc::new(Int32Array::from(vec![1, 2, 3]));
+    let base_url = QuickstartTripsTable::V6Trips8I1U.url_to_mor_avro();
+    let hudi_table = Table::new_sync(base_url.path()).unwrap();
 
-    // Create a RecordBatch from the array
-    let batch = RecordBatch::try_new(schema.clone(), vec![array]).unwrap();
+    let records = hudi_table.read_snapshot_sync(&[]).unwrap();
+    let batch = records.get(0).unwrap();
 
     // Convert to FFI representation
     let array_data = batch.column(0).to_data();

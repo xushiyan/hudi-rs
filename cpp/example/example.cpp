@@ -11,8 +11,8 @@ void print_arrow_array(const ArrowArray* array, const ArrowSchema* schema) {
     std::cout << "Array length: " << array->length << std::endl;
 
     // Only handle int32 arrays for this example
-    if (strcmp(schema->format, "i") == 0) {
-        const int32_t* data = reinterpret_cast<const int32_t*>(array->buffers[1]);
+    if (strcmp(schema->format, "u") == 0) {
+        const uint32_t* data = reinterpret_cast<const uint32_t*>(array->buffers[1]);
         std::cout << "Values: ";
         for (int64_t i = 0; i < array->length; ++i) {
             std::cout << data[i] << " ";

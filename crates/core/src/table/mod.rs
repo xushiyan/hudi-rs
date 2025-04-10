@@ -125,6 +125,13 @@ impl Table {
         TableBuilder::from_base_uri(base_uri).build().await
     }
 
+    pub fn new_sync(base_uri: &str) -> Result<Self> {
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(async {
+            Table::new(base_uri).await
+        })
+    }
+
     /// Create hudi table with options
     pub async fn new_with_options<I, K, V>(base_uri: &str, options: I) -> Result<Self>
     where
@@ -393,6 +400,16 @@ impl Table {
         } else {
             Ok(Vec::new())
         }
+    }
+
+    pub fn read_snapshot_sync(
+        &self,
+        filters: &[(&str, &str, &str)],
+    ) -> Result<Vec<RecordBatch>> {
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(async {
+            self.read_snapshot(filters).await
+        })
     }
 
     /// Get all the records in the table at a given timestamp.
