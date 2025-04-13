@@ -1,16 +1,23 @@
 use cxx_build::CFG;
+use std::env;
+
 fn main() {
     CFG.include_prefix = "hudi";
 
-    cxx_build::bridge("src/bridge.rs")
-        .include("include")
-        .include("include/arrow/c")
-        .flag_if_supported("-std=c++14")
+    let mut build = cxx_build::bridge("src/lib.rs");
+
+    build
+        .flag_if_supported("-std=c++20")
+        .include("include");
+    if let Ok(include_dir) = env::var("DEP_CXX_ASYNC_INCLUDE") {
+        build.include(include_dir);
+    } else {
+        panic!("Where's the `cxx_async` `DEP`?")
+    }
+
+    build
         .compile("hudi");
 
-    println!("cargo:rerun-if-changed=src/bridge.rs");
-    println!("cargo:rerun-if-changed=include/arrow_bridge.h");
-    println!("cargo:rerun-if-changed=include/arrow/c/api.h");
-
-    println!("cargo:root={}", std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    println!("cargo:rerun-if-changed=src/lib.rs");
+    println!("cargo:rerun-if-changed=include/hudi.h");
 }
