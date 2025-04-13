@@ -37,8 +37,6 @@ hudi-test = { path = "../crates/test", version = "0.4.0" }
 cxx = { version = "1.0" }
 arrow = { workspace = true , features = ["ffi"]}
 arrow-array = { workspace = true , features = ["ffi"]}
-arrow-schema = { workspace = true , features = ["ffi"]}
-tokio = { workspace = true }
 
 [build-dependencies]
 cxx-build = { version = "1.0" }

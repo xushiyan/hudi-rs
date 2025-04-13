@@ -151,8 +151,3 @@ message(STATUS "CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Rust library path: ${RUST_LIB_PATH}")
 message(STATUS "Generated C++ path: ${CXX_GENERATED_DIR}")
 message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
-
-# Add subdirectories for examples if they exist
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/example")
-    add_subdirectory(example)
-endif()
