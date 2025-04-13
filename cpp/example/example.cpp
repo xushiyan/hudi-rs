@@ -3,7 +3,7 @@
 #include <cstring>
 #include <iomanip>  // For std::setw
 #include "cxx.h"
-#include "src/bridge.rs.h"  // Generated header from cxx
+#include "src/lib.rs.h"  // Generated header from cxx
 #include "arrow/c/abi.h"  // Arrow C API header
 
 

@@ -13,7 +13,7 @@ set(HUDI_INCLUDE_DIR "/usr/local/include")
 # Add the example executable
 add_executable(hudi_cpp_example
   example.cpp
-  ${HUDI_INCLUDE_DIR}/hudi/src/bridge.rs.cc
+  ${HUDI_INCLUDE_DIR}/hudi/src/lib.rs.cc
 )
 
 # Setup include directories

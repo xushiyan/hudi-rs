@@ -39,7 +39,7 @@ find_path(HUDI_INCLUDE_DIR
 
 # Find the generated cxx bridge headers directory
 find_path(HUDI_CXX_BRIDGE_DIR
-  NAMES src/bridge.rs.h
+  NAMES src/lib.rs.h
   PATHS
     /usr/local/include
     /usr/include
