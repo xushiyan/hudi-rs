@@ -66,6 +66,7 @@ url = { workspace = true }
 # runtime / async
 async-recursion = { workspace = true }
 dashmap = { workspace = true }
+dunce = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
 

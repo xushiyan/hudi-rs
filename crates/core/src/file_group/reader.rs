@@ -274,7 +274,7 @@ mod tests {
     use arrow::array::{ArrayRef, Int64Array, StringArray};
     use arrow::record_batch::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
-    use std::fs::canonicalize;
+    use dunce::canonicalize;
     use std::sync::Arc;
 
     fn get_non_existent_base_uri() -> String {

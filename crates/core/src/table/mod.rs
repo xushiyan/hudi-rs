@@ -774,7 +774,7 @@ mod tests {
     use crate::storage::Storage;
     use hudi_test::{assert_arrow_field_names_eq, assert_avro_field_names_eq, SampleTable};
     use std::collections::HashSet;
-    use std::fs::canonicalize;
+    use dunce::canonicalize;
     use std::{env, panic};
 
     /// Test helper to create a new `Table` instance without validating the configuration.

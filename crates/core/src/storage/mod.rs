@@ -299,7 +299,7 @@ pub async fn get_leaf_dirs(storage: &Storage, subdir: Option<&str>) -> Result<Ve
 mod tests {
     use super::*;
     use std::collections::HashSet;
-    use std::fs::canonicalize;
+    use dunce::canonicalize;
     use std::path::Path;
 
     #[test]

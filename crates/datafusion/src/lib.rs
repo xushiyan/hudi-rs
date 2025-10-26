@@ -334,7 +334,7 @@ mod tests {
     use datafusion::execution::session_state::SessionStateBuilder;
     use datafusion::prelude::{SessionConfig, SessionContext};
     use datafusion_common::{Column, DataFusionError, ScalarValue};
-    use std::fs::canonicalize;
+    use dunce::canonicalize;
     use std::path::Path;
     use std::sync::Arc;
     use url::Url;

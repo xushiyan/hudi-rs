@@ -288,7 +288,7 @@ mod tests {
     use crate::file_group::log_file::log_block::CommandBlock;
     use crate::storage::util::parse_uri;
     use apache_avro::schema::Schema as AvroSchema;
-    use std::fs::canonicalize;
+    use dunce::canonicalize;
 
     fn get_valid_log_avro_data() -> (String, String) {
         (

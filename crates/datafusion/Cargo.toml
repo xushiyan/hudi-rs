@@ -48,6 +48,9 @@ datafusion-expr = { workspace = true }
 datafusion-common = { workspace = true }
 datafusion-physical-expr = { workspace = true }
 
+# "stdlib"
+dunce = { workspace = true }
+
 # runtime / async
 async-trait = { workspace = true }
 tokio = { workspace = true }

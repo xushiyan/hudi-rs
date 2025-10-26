@@ -311,7 +311,7 @@ impl Timeline {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::fs::canonicalize;
+    use dunce::canonicalize;
     use std::path::Path;
     use std::str::FromStr;
     use std::sync::Arc;

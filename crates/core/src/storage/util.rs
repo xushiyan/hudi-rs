@@ -27,10 +27,28 @@ use crate::storage::Result;
 
 /// Parses a URI string into a URL.
 pub fn parse_uri(uri: &str) -> Result<Url> {
-    let url = Url::parse(uri).or_else(|e| {
-        let assumed_path = PathBuf::from(uri);
-        Url::from_file_path(assumed_path).map_err(|_| UrlParseError(e))
-    })?;
+    // Check if this looks like a Windows absolute path (e.g., C:\, D:\)
+    // This pattern matches: optional letter, colon, backslash or forward slash
+    let is_windows_path = uri.len() >= 3
+        && uri.chars().nth(0).map_or(false, |c| c.is_ascii_alphabetic())
+        && uri.chars().nth(1) == Some(':')
+        && uri.chars().nth(2).map_or(false, |c| c == '\\' || c == '/');
+
+    let url = if is_windows_path {
+        // For Windows paths, normalize backslashes and lowercase drive letter
+        let normalized = uri.replace('\\', "/");
+        // Convert drive letter to lowercase (e.g., C: -> c:)
+        let mut chars = normalized.chars();
+        let drive_letter = chars.next().unwrap().to_ascii_lowercase();
+        let rest: String = chars.collect();
+        let file_url = format!("file:///{}{}", drive_letter, rest);
+        Url::parse(&file_url).map_err(|e| UrlParseError(e))?
+    } else {
+        Url::parse(uri).or_else(|e| {
+            let assumed_path = PathBuf::from(uri);
+            Url::from_file_path(assumed_path).map_err(|_| UrlParseError(e))
+        })?
+    };
 
     Ok(url)
 }
@@ -142,6 +160,10 @@ mod tests {
         let result = parse_uri(uri);
         // Windows paths should be converted to file:// URLs
         assert!(result.is_ok());
+        let url = result.unwrap();
+        assert_eq!(url.scheme(), "file");
+        assert_eq!(url.as_ref(), "file:///c:/Users/test/file.txt");
+        assert_eq!(url.path(), "/c:/Users/test/file.txt")
     }
 
     #[test]
