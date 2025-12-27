@@ -596,7 +596,10 @@ impl Table {
         // Try metadata table accelerated listing if files partition is configured
         let metadata_table_records = if self.is_metadata_table_enabled() {
             log::debug!("Using metadata table for file listing");
-            match self.fetch_metadata_table_records().await {
+            match self
+                .fetch_metadata_table_records_pruned(&partition_pruner)
+                .await
+            {
                 Ok(records) => {
                     log::debug!(
                         "Successfully read {} partition records from metadata table",
@@ -629,14 +632,40 @@ impl Table {
             .await
     }
 
-    /// Fetch file records from the metadata table.
+    /// Fetch file records from MDT with optional partition pruning.
     ///
-    /// The metadata table returns records as-of its current state. For time travel
-    /// or incremental queries, the timestamp filtering is handled by the caller
-    /// using completion time views - the metadata table just provides the file listing.
-    async fn fetch_metadata_table_records(&self) -> Result<HashMap<String, FilesPartitionRecord>> {
+    /// When a partition_pruner is provided and has filters, this uses targeted
+    /// HFile lookups to read only the needed partitions. Otherwise, falls back
+    /// to reading all partitions.
+    async fn fetch_metadata_table_records_pruned(
+        &self,
+        partition_pruner: &PartitionPruner,
+    ) -> Result<HashMap<String, FilesPartitionRecord>> {
         let metadata_table = self.new_metadata_table().await?;
-        metadata_table.read_metadata_files().await
+
+        // If no partition filters, read all (existing behavior)
+        if partition_pruner.is_empty() {
+            return metadata_table.read_metadata_files().await;
+        }
+
+        // Step 1: Get all partition paths from __all_partitions__
+        let all_partitions = metadata_table.read_all_partition_paths_internal().await?;
+
+        // Step 2: Apply partition pruning (CPU only, no I/O)
+        let pruned: Vec<&str> = all_partitions
+            .iter()
+            .filter(|p| partition_pruner.should_include(p))
+            .map(|s| s.as_str())
+            .collect();
+
+        if pruned.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Step 3: Read only the pruned partition records
+        metadata_table
+            .read_metadata_files_for_keys_internal(&pruned)
+            .await
     }
 
     /// Get all the changed [FileSlice]s in the table between the given timestamps.
@@ -852,6 +881,228 @@ impl Table {
             .enable_all()
             .build()?
             .block_on(self.read_metadata_files())
+    }
+
+    /// Get all partition paths from the metadata table.
+    ///
+    /// This reads only the `__all_partitions__` record from MDT, which contains
+    /// the list of all partition paths in the table. This is much cheaper than
+    /// reading all partition records.
+    ///
+    /// # Returns
+    /// A vector of partition paths (e.g., ["city=chennai", "city=sf"]).
+    /// Returns empty vector for non-partitioned tables.
+    ///
+    /// # Errors
+    /// Returns error if MDT is not enabled or cannot be read.
+    pub async fn get_all_partition_paths(&self) -> Result<Vec<String>> {
+        if !self.is_metadata_table_enabled() {
+            return Err(CoreError::MetadataTable(
+                "Metadata table is not enabled".to_string(),
+            ));
+        }
+
+        let metadata_table = self.new_metadata_table().await?;
+        metadata_table.read_all_partition_paths_internal().await
+    }
+
+    /// Same as [Table::get_all_partition_paths], but blocking.
+    pub fn get_all_partition_paths_blocking(&self) -> Result<Vec<String>> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(self.get_all_partition_paths())
+    }
+
+    /// Read partition paths from __all_partitions__ record.
+    /// Internal method used by metadata tables.
+    async fn read_all_partition_paths_internal(&self) -> Result<Vec<String>> {
+        // Get the files partition file slice
+        let Some(timestamp) = self.timeline.get_latest_commit_timestamp_as_option() else {
+            return Ok(Vec::new());
+        };
+
+        let excludes = self
+            .timeline
+            .get_replaced_file_groups_as_of(timestamp)
+            .await?;
+        let filters = from_str_tuples([(
+            METADATA_TABLE_PARTITION_FIELD,
+            "=",
+            FilesPartitionRecord::PARTITION_NAME,
+        )])?;
+        let partition_schema = self.get_partition_schema().await?;
+        let partition_pruner =
+            PartitionPruner::new(&filters, &partition_schema, self.hudi_configs.as_ref())?;
+        let completion_time_view = self.timeline.create_completion_time_view();
+        let file_slices = self
+            .file_system_view
+            .get_file_slices_as_of(
+                timestamp,
+                &partition_pruner,
+                &excludes,
+                None,
+                &completion_time_view,
+            )
+            .await?;
+
+        if file_slices.len() != 1 {
+            return Err(CoreError::MetadataTable(format!(
+                "Expected 1 file slice for {} partition, got {}",
+                FilesPartitionRecord::PARTITION_NAME,
+                file_slices.len()
+            )));
+        }
+
+        let file_slice = &file_slices[0];
+        let fg_reader = self.create_file_group_reader_with_options([(
+            HudiReadConfig::FileGroupEndTimestamp,
+            timestamp,
+        )])?;
+
+        // Read only __all_partitions__ record
+        let keys = vec!["__all_partitions__"];
+        let base_file_path = file_slice.base_file_relative_path()?;
+        let log_file_paths: Vec<String> = file_slice
+            .log_files
+            .iter()
+            .map(|log_file| file_slice.log_file_relative_path(log_file))
+            .collect::<Result<Vec<String>>>()?;
+
+        let records = fg_reader
+            .read_metadata_files_for_keys(&base_file_path, log_file_paths, &keys)
+            .await?;
+
+        // Extract partition names from __all_partitions__ record
+        // partition_names() normalizes MDT keys (e.g., "." -> "") for external use
+        match records.get("__all_partitions__") {
+            Some(record) => Ok(record.partition_names()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Read file listings for specific partitions from the metadata table.
+    ///
+    /// This is an optimized version of `read_metadata_files()` that only reads
+    /// records for the specified partition paths, using targeted HFile lookups.
+    ///
+    /// # Arguments
+    /// * `partition_paths` - Partition paths to read (e.g., ["city=chennai"])
+    ///
+    /// # Returns
+    /// HashMap mapping partition paths to their file listings.
+    pub async fn read_metadata_files_for_partitions(
+        &self,
+        partition_paths: &[&str],
+    ) -> Result<HashMap<String, FilesPartitionRecord>> {
+        if !self.is_metadata_table_enabled() {
+            return Err(CoreError::MetadataTable(
+                "Metadata table is not enabled".to_string(),
+            ));
+        }
+
+        let metadata_table = self.new_metadata_table().await?;
+        metadata_table
+            .read_metadata_files_for_keys_internal(partition_paths)
+            .await
+    }
+
+    /// Same as [Table::read_metadata_files_for_partitions], but blocking.
+    pub fn read_metadata_files_for_partitions_blocking(
+        &self,
+        partition_paths: &[&str],
+    ) -> Result<HashMap<String, FilesPartitionRecord>> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(self.read_metadata_files_for_partitions(partition_paths))
+    }
+
+    /// Read specific keys from metadata table.
+    /// Internal method for reading targeted keys from the files partition.
+    ///
+    /// Keys are normalized before lookup: empty partition paths ("") are
+    /// converted to MDT's internal representation ("."). Returned map keys
+    /// are normalized back to external format ("." -> "").
+    async fn read_metadata_files_for_keys_internal(
+        &self,
+        keys: &[&str],
+    ) -> Result<HashMap<String, FilesPartitionRecord>> {
+        if keys.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Normalize keys: "" -> "." for MDT lookup
+        let normalized_keys: Vec<&str> = keys
+            .iter()
+            .map(|k| FilesPartitionRecord::normalize_partition_name_to_mdt(k))
+            .collect();
+
+        let Some(timestamp) = self.timeline.get_latest_commit_timestamp_as_option() else {
+            return Ok(HashMap::new());
+        };
+
+        // Get file slice for files partition (reuse same logic as read_all_partition_paths_internal)
+        let excludes = self
+            .timeline
+            .get_replaced_file_groups_as_of(timestamp)
+            .await?;
+        let filters = from_str_tuples([(
+            METADATA_TABLE_PARTITION_FIELD,
+            "=",
+            FilesPartitionRecord::PARTITION_NAME,
+        )])?;
+        let partition_schema = self.get_partition_schema().await?;
+        let partition_pruner =
+            PartitionPruner::new(&filters, &partition_schema, self.hudi_configs.as_ref())?;
+        let completion_time_view = self.timeline.create_completion_time_view();
+        let file_slices = self
+            .file_system_view
+            .get_file_slices_as_of(
+                timestamp,
+                &partition_pruner,
+                &excludes,
+                None,
+                &completion_time_view,
+            )
+            .await?;
+
+        if file_slices.len() != 1 {
+            return Err(CoreError::MetadataTable(format!(
+                "Expected 1 file slice for {} partition, got {}",
+                FilesPartitionRecord::PARTITION_NAME,
+                file_slices.len()
+            )));
+        }
+
+        let file_slice = &file_slices[0];
+        let fg_reader = self.create_file_group_reader_with_options([(
+            HudiReadConfig::FileGroupEndTimestamp,
+            timestamp,
+        )])?;
+
+        let base_file_path = file_slice.base_file_relative_path()?;
+        let log_file_paths: Vec<String> = file_slice
+            .log_files
+            .iter()
+            .map(|log_file| file_slice.log_file_relative_path(log_file))
+            .collect::<Result<Vec<String>>>()?;
+
+        let mdt_result = fg_reader
+            .read_metadata_files_for_keys(&base_file_path, log_file_paths, &normalized_keys)
+            .await?;
+
+        // Normalize returned map keys: "." -> "" for external API
+        let normalized_result = mdt_result
+            .into_iter()
+            .map(|(key, mut record)| {
+                let normalized_key = FilesPartitionRecord::normalize_partition_name_from_mdt(&key);
+                record.key = normalized_key.clone();
+                (normalized_key, record)
+            })
+            .collect();
+
+        Ok(normalized_result)
     }
 
     /// Get all the latest records in the table.
@@ -1718,11 +1969,13 @@ mod tests {
             all_partitions.record_type,
             MetadataRecordType::AllPartitions
         );
-        let partition_names: HashSet<_> = all_partitions.partition_names().into_iter().collect();
-        assert_eq!(
-            partition_names,
-            HashSet::from(["city=chennai", "city=san_francisco", "city=sao_paulo"])
-        );
+        let partition_names: HashSet<String> =
+            all_partitions.partition_names().into_iter().collect();
+        let expected: HashSet<String> = ["city=chennai", "city=san_francisco", "city=sao_paulo"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(partition_names, expected);
 
         // Validate city=chennai record with actual file names
         let chennai = records.get("city=chennai").unwrap();
@@ -1874,5 +2127,74 @@ mod tests {
                 .contains("can only be called on metadata tables"),
             "Error message should indicate read_metadata_files requires metadata table"
         );
+    }
+
+    #[tokio::test]
+    async fn hudi_table_get_all_partition_paths_from_mdt() {
+        use hudi_test::QuickstartTripsTable;
+        let table_path = QuickstartTripsTable::V8Trips8I3U1D.path_to_mor_avro();
+        let data_table = Table::new(&table_path).await.unwrap();
+
+        if !data_table.is_metadata_table_enabled() {
+            return; // Skip if MDT not enabled
+        }
+
+        let partitions = data_table.get_all_partition_paths().await.unwrap();
+
+        // Should return partition paths from __all_partitions__ record
+        assert!(!partitions.is_empty());
+        // Verify we get the expected partitions
+        let expected_partitions: HashSet<_> =
+            ["city=chennai", "city=san_francisco", "city=sao_paulo"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+        let actual_partitions: HashSet<_> = partitions.into_iter().collect();
+        assert_eq!(
+            actual_partitions, expected_partitions,
+            "Should return the expected partition paths"
+        );
+    }
+
+    #[tokio::test]
+    async fn hudi_table_get_all_partition_paths_errors_when_mdt_not_enabled() {
+        // V6 tables don't have MDT enabled
+        let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+
+        let result = hudi_table.get_all_partition_paths().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("Metadata table is not enabled"),
+            "Error message should indicate MDT is not enabled, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn hudi_table_read_metadata_files_for_partitions() {
+        use hudi_test::QuickstartTripsTable;
+        let table_path = QuickstartTripsTable::V8Trips8I3U1D.path_to_mor_avro();
+        let data_table = Table::new(&table_path).await.unwrap();
+
+        if !data_table.is_metadata_table_enabled() {
+            return;
+        }
+
+        // First get all partitions
+        let all_partitions = data_table.get_all_partition_paths().await.unwrap();
+        assert!(!all_partitions.is_empty());
+
+        // Now read files for only the first partition
+        let first_partition = &all_partitions[0];
+        let records = data_table
+            .read_metadata_files_for_partitions(&[first_partition.as_str()])
+            .await
+            .unwrap();
+
+        // Should only have the requested partition
+        assert_eq!(records.len(), 1);
+        assert!(records.contains_key(first_partition));
     }
 }

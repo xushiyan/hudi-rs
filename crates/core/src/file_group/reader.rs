@@ -26,7 +26,7 @@ use crate::expr::filter::{Filter, SchemableFilter};
 use crate::file_group::file_slice::FileSlice;
 use crate::file_group::log_file::scanner::{LogFileScanner, ScanResult};
 use crate::file_group::record_batches::RecordBatches;
-use crate::hfile::HFileReader;
+use crate::hfile::{HFileReader, HFileRecord};
 use crate::merge::record_merger::RecordMerger;
 use crate::metadata::merger::FilesPartitionMerger;
 use crate::metadata::meta_field::MetaField;
@@ -477,6 +477,104 @@ impl FileGroupReader {
             .enable_all()
             .build()?
             .block_on(self.read_file_slice_from_metadata_table(file_slice))
+    }
+
+    /// Read specific keys from metadata table file slice.
+    ///
+    /// This is an optimized version that uses `HFileReader::lookup_records()` for
+    /// O(log n) key lookups instead of iterating all records. Useful for partition
+    /// pruning where only a subset of partitions need to be read.
+    ///
+    /// # Arguments
+    /// * `base_file_path` - Path to the HFile base file
+    /// * `log_file_paths` - Paths to log files
+    /// * `keys` - Only read records with these keys
+    ///
+    /// # Returns
+    /// HashMap containing only the requested keys that were found.
+    pub async fn read_metadata_files_for_keys<I, S>(
+        &self,
+        base_file_path: &str,
+        log_file_paths: I,
+        keys: &[&str],
+    ) -> Result<HashMap<String, FilesPartitionRecord>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let log_file_paths: Vec<String> = log_file_paths
+            .into_iter()
+            .map(|s| s.as_ref().to_string())
+            .collect();
+
+        // Open HFile and use lookup_records for targeted access
+        let mut hfile_reader = HFileReader::open(&self.storage, base_file_path)
+            .await
+            .map_err(|e| {
+                ReadFileSliceError(format!(
+                    "Failed to read metadata table base file {}: {:?}",
+                    base_file_path, e
+                ))
+            })?;
+
+        // Get Avro schema from HFile
+        let schema = hfile_reader
+            .get_avro_schema()
+            .map_err(|e| ReadFileSliceError(format!("Failed to get Avro schema: {:?}", e)))?
+            .ok_or_else(|| ReadFileSliceError("No Avro schema found in HFile".to_string()))?
+            .clone();
+
+        // Lookup only the requested keys (O(log n) per key)
+        let lookup_results = hfile_reader
+            .lookup_records(keys)
+            .map_err(|e| ReadFileSliceError(format!("Failed to lookup HFile records: {:?}", e)))?;
+
+        // Filter to found records only
+        let base_records: Vec<HFileRecord> = lookup_results
+            .into_iter()
+            .filter_map(|(_, opt_record)| opt_record)
+            .collect();
+
+        // Scan log files if present
+        let log_records = if log_file_paths.is_empty() {
+            vec![]
+        } else {
+            let instant_range = self.create_instant_range_for_log_file_scan();
+            let scan_result = LogFileScanner::new(self.hudi_configs.clone(), self.storage.clone())
+                .scan(log_file_paths, &instant_range)
+                .await?;
+
+            match scan_result {
+                ScanResult::HFileRecords(records) => records,
+                ScanResult::Empty => vec![],
+                ScanResult::RecordBatches(_) => {
+                    return Err(CoreError::LogBlockError(
+                        "Unexpected RecordBatches in metadata table log file".to_string(),
+                    ));
+                }
+            }
+        };
+
+        // Merge with key filtering
+        let merger = FilesPartitionMerger::new(schema);
+        merger.merge_for_keys(&base_records, &log_records, keys)
+    }
+
+    /// Same as [FileGroupReader::read_metadata_files_for_keys], but blocking.
+    pub fn read_metadata_files_for_keys_blocking<I, S>(
+        &self,
+        base_file_path: &str,
+        log_file_paths: I,
+        keys: &[&str],
+    ) -> Result<HashMap<String, FilesPartitionRecord>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(self.read_metadata_files_for_keys(base_file_path, log_file_paths, keys))
     }
 }
 
@@ -986,6 +1084,28 @@ mod tests {
         assert!(merged.contains_key("city=chennai"));
         assert!(merged.contains_key("city=san_francisco"));
         assert!(merged.contains_key("city=sao_paulo"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_metadata_files_for_keys_returns_only_requested() -> Result<()> {
+        let reader = create_metadata_table_reader()?;
+
+        // Request only specific keys
+        let keys = vec!["__all_partitions__", "city=chennai"];
+        let result = reader.read_metadata_files_for_keys_blocking(
+            METADATA_TABLE_FILES_BASE_FILE,
+            METADATA_TABLE_FILES_LOG_FILES.to_vec(),
+            &keys,
+        )?;
+
+        // Should only contain the requested keys
+        assert_eq!(result.len(), 2);
+        assert!(result.contains_key("__all_partitions__"));
+        assert!(result.contains_key("city=chennai"));
+        assert!(!result.contains_key("city=san_francisco"));
+        assert!(!result.contains_key("city=sao_paulo"));
 
         Ok(())
     }

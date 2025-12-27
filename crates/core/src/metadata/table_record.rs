@@ -123,17 +123,49 @@ impl FilesPartitionRecord {
     /// The partition name in the metadata table that stores file listings.
     pub const PARTITION_NAME: &'static str = "files";
 
+    /// The MDT key used for non-partitioned tables.
+    /// Java uses "." as the key in MDT for non-partitioned tables, which maps to "" externally.
+    pub const NON_PARTITIONED_NAME: &'static str = ".";
+
     /// Check if this is an ALL_PARTITIONS record.
     pub fn is_all_partitions(&self) -> bool {
         self.record_type == MetadataRecordType::AllPartitions
     }
 
     /// Get list of partition names (for ALL_PARTITIONS record).
-    pub fn partition_names(&self) -> Vec<&str> {
+    ///
+    /// For non-partitioned tables, the MDT stores "." as the partition key,
+    /// but this method normalizes it to "" to match the external representation.
+    pub fn partition_names(&self) -> Vec<String> {
         if self.is_all_partitions() {
-            self.files.keys().map(|s| s.as_str()).collect()
+            self.files
+                .keys()
+                .map(|s| Self::normalize_partition_name_from_mdt(s))
+                .collect()
         } else {
             vec![]
+        }
+    }
+
+    /// Normalize partition name from MDT internal format to external format.
+    /// MDT uses "." for non-partitioned tables, external API uses "".
+    #[inline]
+    pub fn normalize_partition_name_from_mdt(mdt_key: &str) -> String {
+        if mdt_key == Self::NON_PARTITIONED_NAME {
+            String::new()
+        } else {
+            mdt_key.to_string()
+        }
+    }
+
+    /// Normalize partition name from external format to MDT internal format.
+    /// External API uses "" for non-partitioned tables, MDT uses ".".
+    #[inline]
+    pub fn normalize_partition_name_to_mdt(partition_path: &str) -> &str {
+        if partition_path.is_empty() {
+            Self::NON_PARTITIONED_NAME
+        } else {
+            partition_path
         }
     }
 
@@ -636,6 +668,62 @@ mod tests {
         // partition_names() should return empty for non-AllPartitions record
         let partition_names = record.partition_names();
         assert!(partition_names.is_empty());
+    }
+
+    #[test]
+    fn test_non_partitioned_name_normalization() {
+        // Test normalization from MDT internal format to external format
+        assert_eq!(
+            FilesPartitionRecord::normalize_partition_name_from_mdt("."),
+            ""
+        );
+        assert_eq!(
+            FilesPartitionRecord::normalize_partition_name_from_mdt("city=chennai"),
+            "city=chennai"
+        );
+        assert_eq!(
+            FilesPartitionRecord::normalize_partition_name_from_mdt(""),
+            ""
+        );
+
+        // Test normalization from external format to MDT internal format
+        assert_eq!(
+            FilesPartitionRecord::normalize_partition_name_to_mdt(""),
+            "."
+        );
+        assert_eq!(
+            FilesPartitionRecord::normalize_partition_name_to_mdt("city=chennai"),
+            "city=chennai"
+        );
+        assert_eq!(
+            FilesPartitionRecord::normalize_partition_name_to_mdt("."),
+            "."
+        );
+    }
+
+    #[test]
+    fn test_partition_names_normalizes_non_partitioned() {
+        // Create an ALL_PARTITIONS record with "." key (non-partitioned table)
+        let mut files = HashMap::new();
+        files.insert(
+            ".".to_string(), // MDT uses "." for non-partitioned
+            HoodieMetadataFileInfo {
+                name: ".".to_string(),
+                size: 0,
+                is_deleted: false,
+            },
+        );
+
+        let record = FilesPartitionRecord {
+            key: "__all_partitions__".to_string(),
+            record_type: MetadataRecordType::AllPartitions,
+            files,
+        };
+
+        // partition_names() should normalize "." to ""
+        let names = record.partition_names();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0], ""); // Normalized from "." to ""
     }
 
     #[test]
