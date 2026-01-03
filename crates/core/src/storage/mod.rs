@@ -114,7 +114,11 @@ impl Storage {
         let name = meta.location.filename().ok_or_else(|| {
             InvalidPath(format!("Failed to get file name from: {:?}", meta.location))
         })?;
-        Ok(FileMetadata::new(name.to_string(), meta.size))
+        #[cfg(feature = "arrow-54")]
+        let size = meta.size as u64;
+        #[cfg(not(feature = "arrow-54"))]
+        let size = meta.size;
+        Ok(FileMetadata::new(name.to_string(), size))
     }
 
     /// Get full file metadata for a Parquet file, including record counts from Parquet metadata.
@@ -127,7 +131,13 @@ impl Storage {
         let file_name = location
             .filename()
             .ok_or_else(|| InvalidPath(format!("Failed to get file name from: {:?}", &obj_meta)))?;
+        #[cfg(feature = "arrow-54")]
+        let size = obj_meta.size as u64;
+        #[cfg(not(feature = "arrow-54"))]
         let size = obj_meta.size;
+        #[cfg(feature = "arrow-54")]
+        let reader = ParquetObjectReader::new(obj_store, obj_meta);
+        #[cfg(not(feature = "arrow-54"))]
         let reader = ParquetObjectReader::new(obj_store, obj_path).with_file_size(size);
         let builder = ParquetRecordBatchStreamBuilder::new(reader).await?;
         let parquet_meta = builder.metadata().clone();
@@ -151,6 +161,9 @@ impl Storage {
         let obj_path = ObjPath::from_url_path(obj_url.path())?;
         let obj_store = self.object_store.clone();
         let meta = obj_store.head(&obj_path).await?;
+        #[cfg(feature = "arrow-54")]
+        let reader = ParquetObjectReader::new(obj_store, meta);
+        #[cfg(not(feature = "arrow-54"))]
         let reader = ParquetObjectReader::new(obj_store, obj_path).with_file_size(meta.size);
         let builder = ParquetRecordBatchStreamBuilder::new(reader).await?;
         Ok(builder.metadata().as_ref().clone())
@@ -188,7 +201,9 @@ impl Storage {
         let obj_store = self.object_store.clone();
         let meta = obj_store.head(&obj_path).await?;
 
-        // read parquet
+        #[cfg(feature = "arrow-54")]
+        let reader = ParquetObjectReader::new(obj_store, meta);
+        #[cfg(not(feature = "arrow-54"))]
         let reader = ParquetObjectReader::new(obj_store, obj_path).with_file_size(meta.size);
         let builder = ParquetRecordBatchStreamBuilder::new(reader).await?;
         let schema = builder.schema().clone();
@@ -257,7 +272,11 @@ impl Storage {
                 continue;
             }
 
-            file_metadata.push(FileMetadata::new(name.to_string(), obj_meta.size));
+            #[cfg(feature = "arrow-54")]
+            let size = obj_meta.size as u64;
+            #[cfg(not(feature = "arrow-54"))]
+            let size = obj_meta.size;
+            file_metadata.push(FileMetadata::new(name.to_string(), size));
         }
         Ok(file_metadata)
     }

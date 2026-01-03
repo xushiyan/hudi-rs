@@ -28,9 +28,13 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-# arrow
-arrow = { workspace = true }
-arrow-array = { workspace = true }
+# arrow (default version)
+arrow = { workspace = true, optional = true }
+arrow-array = { workspace = true, optional = true }
+
+# arrow-54 (for compatibility with projects using arrow 54)
+arrow_v54 = { workspace = true, optional = true }
+arrow-array_v54 = { workspace = true, optional = true }
 
 # "stdlib"
 strum = { workspace = true }
@@ -40,3 +44,16 @@ url = { workspace = true }
 # testing
 tempfile = "3.20.0"
 zip-extract = "0.3.0"
+
+[features]
+default = ["arrow-default"]
+
+arrow-default = [
+    "dep:arrow",
+    "dep:arrow-array",
+]
+
+arrow-54 = [
+    "dep:arrow_v54",
+    "dep:arrow-array_v54",
+]

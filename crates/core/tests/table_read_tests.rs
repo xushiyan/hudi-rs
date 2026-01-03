@@ -21,7 +21,7 @@
 //! This module contains tests for snapshot and time-travel queries,
 //! organized by table version (v6, v8+) and query type.
 
-use arrow::compute::concat_batches;
+use hudi_core::arrow::compute::concat_batches;
 use hudi_core::config::read::HudiReadConfig;
 use hudi_core::config::util::empty_filters;
 use hudi_core::error::Result;

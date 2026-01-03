@@ -43,6 +43,72 @@
 //! }
 //! ```
 
+// Re-export arrow dependencies based on feature flags.
+// This allows the crate to support multiple arrow versions.
+
+// Compile-time check: ensure exactly one arrow version is enabled
+#[cfg(all(feature = "arrow-default", feature = "arrow-54"))]
+compile_error!("Features 'arrow-default' and 'arrow-54' are mutually exclusive. Enable only one.");
+
+#[cfg(not(any(feature = "arrow-default", feature = "arrow-54")))]
+compile_error!("Either 'arrow-default' or 'arrow-54' feature must be enabled.");
+
+// Arrow v54 re-exports (aliased to match the standard crate names)
+#[cfg(feature = "arrow-54")]
+pub extern crate arrow_v54 as arrow;
+#[cfg(feature = "arrow-54")]
+pub extern crate arrow_arith_v54 as arrow_arith;
+#[cfg(feature = "arrow-54")]
+pub extern crate arrow_array_v54 as arrow_array;
+#[cfg(feature = "arrow-54")]
+pub extern crate arrow_buffer_v54 as arrow_buffer;
+#[cfg(feature = "arrow-54")]
+pub extern crate arrow_cast_v54 as arrow_cast;
+#[cfg(feature = "arrow-54")]
+pub extern crate arrow_ipc_v54 as arrow_ipc;
+#[cfg(feature = "arrow-54")]
+pub extern crate arrow_json_v54 as arrow_json;
+#[cfg(feature = "arrow-54")]
+pub extern crate arrow_ord_v54 as arrow_ord;
+#[cfg(feature = "arrow-54")]
+pub extern crate arrow_row_v54 as arrow_row;
+#[cfg(feature = "arrow-54")]
+pub extern crate arrow_schema_v54 as arrow_schema;
+#[cfg(feature = "arrow-54")]
+pub extern crate arrow_select_v54 as arrow_select;
+#[cfg(feature = "arrow-54")]
+pub extern crate object_store_v54 as object_store;
+#[cfg(feature = "arrow-54")]
+pub extern crate parquet_v54 as parquet;
+
+// Arrow default re-exports
+#[cfg(feature = "arrow-default")]
+pub extern crate arrow;
+#[cfg(feature = "arrow-default")]
+pub extern crate arrow_arith;
+#[cfg(feature = "arrow-default")]
+pub extern crate arrow_array;
+#[cfg(feature = "arrow-default")]
+pub extern crate arrow_buffer;
+#[cfg(feature = "arrow-default")]
+pub extern crate arrow_cast;
+#[cfg(feature = "arrow-default")]
+pub extern crate arrow_ipc;
+#[cfg(feature = "arrow-default")]
+pub extern crate arrow_json;
+#[cfg(feature = "arrow-default")]
+pub extern crate arrow_ord;
+#[cfg(feature = "arrow-default")]
+pub extern crate arrow_row;
+#[cfg(feature = "arrow-default")]
+pub extern crate arrow_schema;
+#[cfg(feature = "arrow-default")]
+pub extern crate arrow_select;
+#[cfg(feature = "arrow-default")]
+pub extern crate object_store;
+#[cfg(feature = "arrow-default")]
+pub extern crate parquet;
+
 mod avro_to_arrow;
 pub mod config;
 pub mod error;
