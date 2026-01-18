@@ -21,27 +21,26 @@
 //!
 //! This module provides methods for interacting with Hudi's metadata table,
 //! which stores file listings and other metadata for efficient table operations.
+//!
+//! # Module Structure
+//! - `records` - Record types for metadata table partitions
+//! - `files` - Files partition reading
+//! - `stats` - Column and partition statistics reading
 
+mod files;
 pub mod records;
-
-use std::collections::HashMap;
-
-use arrow_schema::Schema;
+mod stats;
 
 use crate::Result;
-use crate::config::read::HudiReadConfig;
 use crate::config::table::HudiTableConfig::{
     MetadataTableEnabled, MetadataTablePartitions, PartitionFields, TableVersion,
 };
 use crate::error::CoreError;
-use crate::expr::filter::from_str_tuples;
 use crate::metadata::METADATA_TABLE_PARTITION_FIELD;
 use crate::storage::util::join_url_segments;
 use crate::table::Table;
-use crate::table::file_pruner::FilePruner;
-use crate::table::partition::PartitionPruner;
 
-use records::FilesPartitionRecord;
+use records::{ColumnStatsRecord, FilesPartitionRecord, PartitionStatsRecord};
 
 impl Table {
     /// Check if this table is a metadata table.
@@ -78,7 +77,6 @@ impl Table {
     /// even without explicit `hoodie.metadata.enable=true`. When metadata table
     /// is enabled, it must have at least the `files` partition enabled.
     pub fn is_metadata_table_enabled(&self) -> bool {
-        // TODO: drop v6 support then no need to check table version here
         let table_version: isize = self
             .hudi_configs
             .get(TableVersion)
@@ -107,9 +105,23 @@ impl Table {
         metadata_explicitly_enabled || has_files_partition
     }
 
-    /// Create a metadata table instance for this data table.
+    /// Check if the column_stats partition is available in the metadata table.
     ///
-    /// TODO: support more partitions. Only "files" is used currently.
+    /// Returns `true` if "column_stats" is in the configured [`MetadataTablePartitions`].
+    pub fn has_column_stats_partition(&self) -> bool {
+        self.get_metadata_table_partitions()
+            .contains(&ColumnStatsRecord::PARTITION_NAME.to_string())
+    }
+
+    /// Check if the partition_stats partition is available in the metadata table.
+    ///
+    /// Returns `true` if "partition_stats" is in the configured [`MetadataTablePartitions`].
+    pub fn has_partition_stats_partition(&self) -> bool {
+        self.get_metadata_table_partitions()
+            .contains(&PartitionStatsRecord::PARTITION_NAME.to_string())
+    }
+
+    /// Create a metadata table instance for this data table.
     ///
     /// # Errors
     ///
@@ -147,152 +159,13 @@ impl Table {
             .build()?
             .block_on(async { self.new_metadata_table().await })
     }
-
-    /// Fetch records from the `files` partition of metadata table
-    /// with optional data table partition pruning.
-    ///
-    /// Records are returned with normalized partition keys. For non-partitioned tables,
-    /// the key is "" (empty string) instead of the internal "." representation.
-    /// Normalization happens at decode time in [`decode_files_partition_record_with_schema`].
-    ///
-    /// # Note
-    /// Must be called on a DATA table, not a METADATA table.
-    pub async fn read_metadata_table_files_partition(
-        &self,
-        partition_pruner: &PartitionPruner,
-    ) -> Result<HashMap<String, FilesPartitionRecord>> {
-        let metadata_table = self.new_metadata_table().await?;
-        metadata_table
-            .fetch_files_partition_records(partition_pruner)
-            .await
-    }
-
-    /// Same as [Table::read_metadata_table_files_partition], but blocking.
-    pub fn read_metadata_table_files_partition_blocking(
-        &self,
-        partition_pruner: &PartitionPruner,
-    ) -> Result<HashMap<String, FilesPartitionRecord>> {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-            .block_on(self.read_metadata_table_files_partition(partition_pruner))
-    }
-
-    /// Fetch records from the `files` partition with optional partition pruning.
-    ///
-    /// For non-partitioned tables, directly fetches the "." record.
-    /// For partitioned tables with filters, performs partition pruning via `__all_partitions__`.
-    ///
-    /// # Arguments
-    /// * `partition_pruner` - Data table's partition pruner to filter partitions.
-    ///
-    /// # Note
-    /// Must be called on a METADATA table instance.
-    pub async fn fetch_files_partition_records(
-        &self,
-        partition_pruner: &PartitionPruner,
-    ) -> Result<HashMap<String, FilesPartitionRecord>> {
-        // Non-partitioned table: directly fetch "." record
-        if !partition_pruner.is_table_partitioned() {
-            return self
-                .read_files_partition(&[FilesPartitionRecord::NON_PARTITIONED_NAME])
-                .await;
-        }
-
-        // Partitioned table without filters: read all records
-        if partition_pruner.is_empty() {
-            return self.read_files_partition(&[]).await;
-        }
-
-        // Partitioned table with filters: partition pruning
-        let all_partitions_records = self
-            .read_files_partition(&[FilesPartitionRecord::ALL_PARTITIONS_KEY])
-            .await?;
-
-        let partition_names: Vec<&str> = all_partitions_records
-            .get(FilesPartitionRecord::ALL_PARTITIONS_KEY)
-            .map(|r| r.partition_names())
-            .unwrap_or_default();
-
-        // Step 2: Apply partition pruning
-        let pruned: Vec<&str> = partition_names
-            .into_iter()
-            .filter(|p| partition_pruner.should_include(p))
-            .collect();
-
-        if pruned.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        // Step 3: Read only the pruned partition records
-        self.read_files_partition(&pruned).await
-    }
-
-    /// Read records from the `files` partition.
-    ///
-    /// If keys is empty, reads all records. Otherwise, reads only the specified keys.
-    ///
-    /// # Note
-    /// Must be called on a METADATA table instance.
-    async fn read_files_partition(
-        &self,
-        keys: &[&str],
-    ) -> Result<HashMap<String, FilesPartitionRecord>> {
-        let Some(timestamp) = self.timeline.get_latest_commit_timestamp_as_option() else {
-            return Ok(HashMap::new());
-        };
-
-        let timeline_view = self.timeline.create_view_as_of(timestamp).await?;
-
-        let filters = from_str_tuples([(
-            METADATA_TABLE_PARTITION_FIELD,
-            "=",
-            FilesPartitionRecord::PARTITION_NAME,
-        )])?;
-        let partition_schema = self.get_partition_schema().await?;
-        let partition_pruner =
-            PartitionPruner::new(&filters, &partition_schema, self.hudi_configs.as_ref())?;
-
-        // Use empty file pruner for metadata table - no column stats pruning needed
-        // Use empty schema since the pruner is empty and won't use the schema
-        let file_pruner = FilePruner::empty();
-        let table_schema = Schema::empty();
-
-        let file_slices = self
-            .file_system_view
-            .get_file_slices_by_storage_listing(
-                &partition_pruner,
-                &file_pruner,
-                &table_schema,
-                &timeline_view,
-            )
-            .await?;
-
-        if file_slices.len() != 1 {
-            return Err(CoreError::MetadataTable(format!(
-                "Expected 1 file slice for {} partition, got {}",
-                FilesPartitionRecord::PARTITION_NAME,
-                file_slices.len()
-            )));
-        }
-
-        let file_slice = file_slices.into_iter().next().unwrap();
-        let fg_reader = self.create_file_group_reader_with_options([(
-            HudiReadConfig::FileGroupEndTimestamp,
-            timestamp,
-        )])?;
-
-        fg_reader
-            .read_metadata_table_files_partition(&file_slice, keys)
-            .await
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::table::HudiTableConfig::TableVersion;
-    use crate::table::partition::PartitionPruner;
+    use crate::table::PartitionPruner;
     use hudi_test::{QuickstartTripsTable, SampleTable};
     use records::{FilesPartitionRecord, MetadataRecordType};
     use std::collections::HashSet;

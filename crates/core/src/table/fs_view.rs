@@ -31,9 +31,8 @@ use crate::file_group::file_slice::FileSlice;
 use crate::metadata::table::records::FilesPartitionRecord;
 use crate::storage::Storage;
 use crate::table::Table;
-use crate::table::file_pruner::FilePruner;
 use crate::table::listing::FileLister;
-use crate::table::partition::PartitionPruner;
+use crate::table::{FilePruner, PartitionPruner};
 use crate::timeline::view::TimelineView;
 use dashmap::DashMap;
 
@@ -68,18 +67,22 @@ impl FileSystemView {
     /// - If `files_partition_records` is Some: Uses pre-fetched metadata table records
     /// - If `files_partition_records` is None: Uses storage listing via FileLister
     ///
-    /// # Stats Pruning Source (for non-empty file_pruner)
-    /// - Currently: Always extracts stats from Parquet file footers
-    /// - TODO: Use metadata table partitions when available:
-    ///   - partition_stats: Enhance PartitionPruner to prune partitions before file listing
-    ///   - column_stats: Prune files without reading Parquet footers
+    /// # Stats Pruning
+    /// Column statistics can come from two sources, both stored as `StatisticsContainer`:
+    /// 1. Metadata table's column_stats partition (preferred, batch loaded)
+    /// 2. Parquet file footers (fallback, loaded per-file)
+    ///
+    /// # Partition Stats Enhancement
+    /// If metadata table has partition_stats partition, enhances PartitionPruner with
+    /// aggregated statistics to prune entire partitions before processing files.
     ///
     /// # Arguments
     /// * `partition_pruner` - Filters which partitions to include
     /// * `file_pruner` - Filters files based on column statistics
-    /// * `table_schema` - Table schema for statistics extraction
+    /// * `table_schema` - Table schema for statistics extraction from Parquet footers
     /// * `timeline_view` - The timeline view providing query timestamp and completion time lookups
     /// * `files_partition_records` - Optional pre-fetched metadata table records
+    /// * `data_table` - Optional data table for accessing metadata table stats
     async fn load_file_groups(
         &self,
         partition_pruner: &PartitionPruner,
@@ -87,12 +90,8 @@ impl FileSystemView {
         table_schema: &Schema,
         timeline_view: &TimelineView,
         files_partition_records: Option<&HashMap<String, FilesPartitionRecord>>,
+        data_table: Option<&Table>,
     ) -> Result<()> {
-        // TODO: Enhance PartitionPruner with partition_stats support
-        // - Load partition_stats from metadata table into PartitionPruner
-        // - PartitionPruner.should_include() will use both partition column values AND partition_stats
-        // - For non-partitioned tables: check partition_pruner.can_any_partition_match() for early return
-
         // Step 1: Get file groups from appropriate source
         let file_groups_map = if let Some(records) = files_partition_records {
             // Use pre-fetched metadata table records
@@ -110,10 +109,25 @@ impl FileSystemView {
                 .await?
         };
 
-        // Step 2: Apply partition pruning (for metadata table path) and stats pruning
+        // Step 2: Enhance PartitionPruner with partition_stats if available
+        let partition_paths: Vec<String> =
+            file_groups_map.iter().map(|r| r.key().clone()).collect();
+        let partition_pruner = self
+            .enhance_partition_pruner_with_stats(
+                partition_pruner,
+                file_pruner,
+                &partition_paths,
+                data_table,
+            )
+            .await;
+
+        // Step 3: Check if column_stats are available for file-level pruning
+        let use_column_stats = data_table
+            .map(|t| t.has_column_stats_partition())
+            .unwrap_or(false);
+
+        // Step 4: Apply partition pruning (for metadata table path) and stats pruning
         // Note: Storage listing path already applies partition pruning via FileLister
-        // TODO: Check if metadata table column_stats partition is available
-        // and use that instead of Parquet footers for better performance
         for (partition_path, file_groups) in file_groups_map {
             // Skip partitions that don't match the pruner (for metadata table path)
             if files_partition_records.is_some()
@@ -123,14 +137,31 @@ impl FileSystemView {
                 continue;
             }
 
+            // Load column stats from metadata table if available
+            let preloaded_stats = if use_column_stats && !file_pruner.is_empty() {
+                self.load_column_stats_from_metadata_table(
+                    &file_groups,
+                    file_pruner,
+                    timeline_view.as_of_timestamp(),
+                    &partition_path,
+                    data_table.expect("data_table must be Some when use_column_stats is true"),
+                )
+                .await
+            } else {
+                HashMap::new()
+            };
+
+            // Apply unified stats pruning (uses preloaded stats, falls back to footer)
             let retained = self
-                .apply_stats_pruning_from_footers(
+                .apply_stats_pruning(
                     file_groups,
                     file_pruner,
                     table_schema,
                     timeline_view.as_of_timestamp(),
+                    &preloaded_stats,
                 )
                 .await;
+
             self.partition_to_file_groups
                 .insert(partition_path, retained);
         }
@@ -138,20 +169,127 @@ impl FileSystemView {
         Ok(())
     }
 
-    /// Apply file-level stats pruning using Parquet file footers.
+    /// Enhance PartitionPruner with partition-level statistics from the metadata table.
     ///
-    /// Returns the filtered list of file groups that pass the pruning check.
+    /// If the data table has a partition_stats partition available and there are data column
+    /// filters, this method reads partition statistics and adds them to the pruner.
+    async fn enhance_partition_pruner_with_stats(
+        &self,
+        partition_pruner: &PartitionPruner,
+        file_pruner: &FilePruner,
+        partition_paths: &[String],
+        data_table: Option<&Table>,
+    ) -> PartitionPruner {
+        // Check if partition_stats are available and we have filters to apply
+        let Some(table) = data_table else {
+            return partition_pruner.clone();
+        };
+
+        if !table.has_partition_stats_partition() || file_pruner.is_empty() {
+            return partition_pruner.clone();
+        }
+
+        // Get column names for stats lookup
+        let column_names = file_pruner.filter_column_names();
+
+        if partition_paths.is_empty() || column_names.is_empty() {
+            return partition_pruner.clone();
+        }
+
+        // Read partition stats from metadata table
+        let partition_path_refs: Vec<&str> = partition_paths.iter().map(|s| s.as_str()).collect();
+        match table
+            .read_partition_stats(&partition_path_refs, &column_names)
+            .await
+        {
+            Ok(partition_stats) => {
+                log::debug!(
+                    "Loaded partition_stats for {} partitions, {} columns",
+                    partition_paths.len(),
+                    column_names.len()
+                );
+                partition_pruner
+                    .clone()
+                    .with_partition_stats(partition_stats)
+                    .with_data_filters(file_pruner.filters())
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to read partition_stats: {e}. Continuing without partition stats pruning."
+                );
+                partition_pruner.clone()
+            }
+        }
+    }
+
+    /// Load column statistics from the metadata table for files in a partition.
+    ///
+    /// Returns a map from file name to StatisticsContainer. On error, returns an
+    /// empty map (caller will fall back to Parquet footers).
+    async fn load_column_stats_from_metadata_table(
+        &self,
+        file_groups: &[FileGroup],
+        file_pruner: &FilePruner,
+        as_of_timestamp: &str,
+        partition_path: &str,
+        data_table: &Table,
+    ) -> HashMap<String, crate::statistics::StatisticsContainer> {
+        // Collect file names for stats lookup
+        let file_names: Vec<String> = file_groups
+            .iter()
+            .filter_map(|fg| {
+                fg.get_file_slice_as_of(as_of_timestamp)
+                    .and_then(|fsl| fsl.base_file_relative_path().ok())
+                    .map(|path| path.rsplit('/').next().unwrap_or(&path).to_string())
+            })
+            .collect();
+
+        if file_names.is_empty() {
+            return HashMap::new();
+        }
+
+        let file_name_refs: Vec<&str> = file_names.iter().map(|s| s.as_str()).collect();
+        let column_names = file_pruner.filter_column_names();
+
+        // Read column stats from metadata table
+        match data_table
+            .read_column_stats_for_files(&file_name_refs, &column_names, partition_path)
+            .await
+        {
+            Ok(stats) => {
+                log::debug!(
+                    "Loaded column_stats for {} files in partition '{partition_path}'",
+                    file_names.len()
+                );
+                stats
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to read column_stats for partition '{partition_path}': {e}. Will fall back to Parquet footers."
+                );
+                HashMap::new()
+            }
+        }
+    }
+
+    /// Apply file-level stats pruning using column statistics.
+    ///
+    /// This is the unified pruning method that works with `StatisticsContainer` from any source:
+    /// - If pre-loaded stats are available (from metadata table), use them
+    /// - Otherwise, load stats from Parquet file footers as fallback
+    ///
     /// Files are included (not pruned) if:
     /// - The pruner has no filters
-    /// - The file is not a Parquet file
-    /// - Column stats cannot be loaded (conservative behavior)
+    /// - The file is not a Parquet file (for footer fallback)
+    /// - Stats cannot be loaded from any source (conservative behavior)
     /// - The file's stats indicate it might contain matching rows
-    async fn apply_stats_pruning_from_footers(
+    async fn apply_stats_pruning(
         &self,
         file_groups: Vec<FileGroup>,
         file_pruner: &FilePruner,
         table_schema: &Schema,
         as_of_timestamp: &str,
+        preloaded_stats: &HashMap<String, crate::statistics::StatisticsContainer>,
     ) -> Vec<FileGroup> {
         if file_pruner.is_empty() {
             return file_groups;
@@ -172,32 +310,30 @@ impl FileSystemView {
                     }
                 };
 
-                // Case-insensitive check for .parquet extension
-                if !relative_path.to_lowercase().ends_with(".parquet") {
-                    retained.push(fg);
-                    continue;
-                }
+                // Extract file name for stats lookup
+                let file_name = relative_path.rsplit('/').next().unwrap_or(&relative_path);
 
-                // Load column stats from Parquet footer
-                let stats = match self
-                    .storage
-                    .get_parquet_column_stats(&relative_path, table_schema)
-                    .await
-                {
-                    Ok(s) => s,
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to load column stats for {relative_path}: {e}. Including file."
-                        );
-                        retained.push(fg);
-                        continue;
-                    }
+                // Try pre-loaded stats first (from metadata table), then fall back to Parquet footer
+                let stats = if let Some(s) = preloaded_stats.get(file_name) {
+                    Some(s.clone())
+                } else {
+                    // Fall back to loading from Parquet footer
+                    self.load_stats_from_parquet_footer(&relative_path, table_schema)
+                        .await
                 };
 
-                if file_pruner.should_include(&stats) {
-                    retained.push(fg);
-                } else {
-                    log::debug!("Pruned file {relative_path} based on column stats");
+                match stats {
+                    Some(ref s) => {
+                        if file_pruner.should_include(s) {
+                            retained.push(fg);
+                        } else {
+                            log::debug!("Pruned file {relative_path} based on column stats");
+                        }
+                    }
+                    None => {
+                        // No stats available from any source - include conservatively
+                        retained.push(fg);
+                    }
                 }
             } else {
                 // No file slice as of timestamp, include the file group
@@ -207,6 +343,34 @@ impl FileSystemView {
         }
 
         retained
+    }
+
+    /// Load column statistics from a Parquet file's footer.
+    ///
+    /// Returns None if the file is not a Parquet file or stats cannot be loaded.
+    async fn load_stats_from_parquet_footer(
+        &self,
+        relative_path: &str,
+        table_schema: &Schema,
+    ) -> Option<crate::statistics::StatisticsContainer> {
+        // Only load stats for Parquet files
+        if !relative_path.to_lowercase().ends_with(".parquet") {
+            return None;
+        }
+
+        match self
+            .storage
+            .get_parquet_column_stats(relative_path, table_schema)
+            .await
+        {
+            Ok(stats) => Some(stats),
+            Err(e) => {
+                log::warn!(
+                    "Failed to load column stats from footer for {relative_path}: {e}. Including file."
+                );
+                None
+            }
+        }
     }
 
     /// Collect file slices from loaded file groups using the timeline view.
@@ -253,18 +417,29 @@ impl FileSystemView {
     /// * `file_pruner` - Filters files based on column statistics
     /// * `table_schema` - Table schema for statistics extraction
     /// * `timeline_view` - The timeline view containing query context
-    /// * `metadata_table` - Optional metadata table instance
+    /// * `data_table` - Optional data table for metadata access (files listing and stats)
     pub(crate) async fn get_file_slices(
         &self,
         partition_pruner: &PartitionPruner,
         file_pruner: &FilePruner,
         table_schema: &Schema,
         timeline_view: &TimelineView,
-        metadata_table: Option<&Table>,
+        data_table: Option<&Table>,
     ) -> Result<Vec<FileSlice>> {
         // Fetch records from metadata table if available
-        let files_partition_records = if let Some(mdt) = metadata_table {
-            Some(mdt.fetch_files_partition_records(partition_pruner).await?)
+        let files_partition_records = if let Some(table) = data_table {
+            match table
+                .read_metadata_table_files_partition(partition_pruner)
+                .await
+            {
+                Ok(records) => Some(records),
+                Err(e) => {
+                    log::warn!(
+                        "Failed to read metadata table files partition: {e}. Falling back to storage listing."
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
@@ -275,6 +450,7 @@ impl FileSystemView {
             table_schema,
             timeline_view,
             files_partition_records.as_ref(),
+            data_table,
         )
         .await?;
 
@@ -299,12 +475,14 @@ impl FileSystemView {
         table_schema: &Schema,
         timeline_view: &TimelineView,
     ) -> Result<Vec<FileSlice>> {
-        // Pass None to force storage listing (avoids recursion for metadata table)
+        // Pass None for both files_partition_records and data_table to force storage listing
+        // and footer-based stats pruning (avoids recursion for metadata table)
         self.load_file_groups(
             partition_pruner,
             file_pruner,
             table_schema,
             timeline_view,
+            None,
             None,
         )
         .await?;

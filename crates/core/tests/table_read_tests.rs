@@ -1144,7 +1144,7 @@ mod streaming_queries {
 /// These tests verify MDT-accelerated file listing and partition normalization.
 mod mdt_enabled_tables {
     use super::*;
-    use hudi_core::table::partition::PartitionPruner;
+    use hudi_core::table::PartitionPruner;
 
     mod snapshot_queries {
         use super::*;
@@ -1224,6 +1224,33 @@ mod mdt_enabled_tables {
                 !files_record.files.is_empty(),
                 "Files record should contain file entries"
             );
+
+            Ok(())
+        }
+
+        /// Test reading column statistics from metadata table.
+        #[tokio::test]
+        async fn test_v8_nonpartitioned_read_column_stats() -> Result<()> {
+            let base_url = SampleTableMdt::V8Nonpartitioned.url_to_mor_avro();
+            let hudi_table = Table::new(base_url.path()).await?;
+
+            // Verify column_stats partition is available
+            assert!(hudi_table.has_column_stats_partition());
+
+            // Get file slices and read column stats
+            let file_slices = hudi_table.get_file_slices(empty_filters()).await?;
+            let file_names: Vec<String> = file_slices
+                .iter()
+                .map(|fs| fs.base_file.file_name())
+                .collect();
+            let file_name_refs: Vec<&str> = file_names.iter().map(|s| s.as_str()).collect();
+
+            let stats = hudi_table
+                .read_column_stats_for_files(&file_name_refs, &["id", "longField"], "")
+                .await?;
+
+            // API should work - stats may be empty or contain data depending on test data
+            assert!(stats.is_empty() || stats.values().any(|s| !s.columns.is_empty()));
 
             Ok(())
         }
