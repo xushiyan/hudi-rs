@@ -125,14 +125,17 @@ pub enum SampleTable {
     V8Nonpartitioned,
     V8SimplekeygenHivestyleNoMetafields,
     V8SimplekeygenNonhivestyle,
-    V8SimplekeygenNonhivestyleOverwritetable,
-    V8TimebasedkeygenNonhivestyle,
+    V9NonpartitionedRollback,
+    V9TimebasedkeygenEpochmillis,
+    V9TimebasedkeygenNonhivestyle,
+    V9TimebasedkeygenUnixtimestamp,
     V9TxnsComplexMeta,
     V9TxnsComplexNometa,
     V9TxnsNonpartMeta,
     V9TxnsNonpartNometa,
     V9TxnsSimpleMeta,
     V9TxnsSimpleNometa,
+    V9TxnsSimpleOverwrite,
 }
 
 impl SampleTable {
@@ -250,6 +253,15 @@ mod tests {
                 }
                 SampleTable::V6NonpartitionedRollback => {
                     let path = t.zip_path("mor", Some("parquet"));
+                    assert!(path.exists());
+                }
+                SampleTable::V9NonpartitionedRollback => {
+                    let path = t.zip_path("mor", Some("avro"));
+                    assert!(path.exists());
+                }
+                SampleTable::V9TimebasedkeygenEpochmillis
+                | SampleTable::V9TimebasedkeygenUnixtimestamp => {
+                    let path = t.zip_path("cow", None);
                     assert!(path.exists());
                 }
                 ref table if table.as_ref().starts_with("v9") => {
