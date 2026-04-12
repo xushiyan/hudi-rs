@@ -774,6 +774,302 @@ mod v8_tables {
     }
 }
 
+/// Test helper module for v9 tables (1.1 spec)
+mod v9_tables {
+    use super::*;
+    use arrow_array::{Int64Array, RecordBatch, StringArray};
+
+    fn txn_rows(records: &[RecordBatch]) -> Vec<(String, String, i64)> {
+        let mut rows = Vec::new();
+        for record_batch in records {
+            let txn_ids = record_batch
+                .column_by_name("txn_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let txn_types = record_batch
+                .column_by_name("txn_type")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let txn_timestamps = record_batch
+                .column_by_name("txn_ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+
+            for i in 0..record_batch.num_rows() {
+                rows.push((
+                    txn_ids.value(i).to_string(),
+                    txn_types.value(i).to_string(),
+                    txn_timestamps.value(i),
+                ));
+            }
+        }
+        rows.sort_unstable();
+        rows
+    }
+
+    async fn read_txn_rows_from_snapshot(hudi_table: &Table) -> Result<Vec<(String, String, i64)>> {
+        let records = hudi_table.read_snapshot(empty_filters()).await?;
+        Ok(txn_rows(&records))
+    }
+
+    async fn read_txn_rows_as_of(
+        hudi_table: &Table,
+        timestamp: &str,
+    ) -> Result<Vec<(String, String, i64)>> {
+        let records = hudi_table
+            .read_snapshot_as_of(timestamp, empty_filters())
+            .await?;
+        Ok(txn_rows(&records))
+    }
+
+    async fn open_table(path: &str, use_read_optimized: bool) -> Result<Table> {
+        if use_read_optimized {
+            Table::new_with_options(
+                path,
+                [(HudiReadConfig::UseReadOptimizedMode.as_ref(), "true")],
+            )
+            .await
+        } else {
+            Table::new(path).await
+        }
+    }
+
+    mod snapshot_queries {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_timebasedkeygen_epochmillis_cow_snapshot() -> Result<()> {
+            let base_url = SampleTable::V9TimebasedkeygenEpochmillis.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-001".to_string(), "reversal".to_string(), 1700100000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700200000003),
+                    ("TXN-005".to_string(), "debit".to_string(), 1700100000005),
+                    ("TXN-006".to_string(), "transfer".to_string(), 1700100000006),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_timebasedkeygen_nonhivestyle_cow_snapshot() -> Result<()> {
+            let base_url = SampleTable::V9TimebasedkeygenNonhivestyle.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-001".to_string(), "reversal".to_string(), 1700100000001),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700200000003),
+                    ("TXN-004".to_string(), "transfer".to_string(), 1700000000004),
+                    ("TXN-005".to_string(), "debit".to_string(), 1700100000005),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_timebasedkeygen_unixtimestamp_cow_snapshot() -> Result<()> {
+            let base_url = SampleTable::V9TimebasedkeygenUnixtimestamp.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-001".to_string(), "reversal".to_string(), 1700100000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700200000003),
+                    ("TXN-005".to_string(), "debit".to_string(), 1700100000005),
+                    ("TXN-006".to_string(), "transfer".to_string(), 1700100000006),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_txns_simple_overwrite_cow_snapshot() -> Result<()> {
+            let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-101".to_string(), "debit".to_string(), 1700500000001),
+                    ("TXN-102".to_string(), "debit".to_string(), 1700500000002),
+                    ("TXN-103".to_string(), "debit".to_string(), 1700500000003),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_timebasedkeygen_nonhivestyle_mor_snapshot() -> Result<()> {
+            let base_url = SampleTable::V9TimebasedkeygenNonhivestyle.url_to_mor_avro();
+            let hudi_table = open_table(base_url.path(), true).await?;
+
+            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-001".to_string(), "reversal".to_string(), 1700100000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700000000003),
+                    ("TXN-004".to_string(), "transfer".to_string(), 1700000000004),
+                    ("TXN-005".to_string(), "debit".to_string(), 1700100000005),
+                    ("TXN-006".to_string(), "debit".to_string(), 1700300000006),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_txns_simple_overwrite_mor_snapshot() -> Result<()> {
+            let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_mor_avro();
+            let hudi_table = open_table(base_url.path(), true).await?;
+
+            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-101".to_string(), "debit".to_string(), 1700500000001),
+                    ("TXN-102".to_string(), "debit".to_string(), 1700500000002),
+                    ("TXN-103".to_string(), "debit".to_string(), 1700500000003),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_nonpartitioned_rollback_mor_snapshot() -> Result<()> {
+            let base_url = SampleTable::V9NonpartitionedRollback.url_to_mor_avro();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700200000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700000000003),
+                ]
+            );
+            Ok(())
+        }
+    }
+
+    mod time_travel_queries {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_txns_simple_overwrite_cow_time_travel() -> Result<()> {
+            let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let commits = hudi_table.timeline.get_completed_commits(false).await?;
+            let replace_commits = hudi_table
+                .timeline
+                .get_completed_replacecommits(false)
+                .await?;
+            assert_eq!(
+                commits.len(),
+                2,
+                "Expected two commit instants before overwrite"
+            );
+            assert_eq!(
+                replace_commits.len(),
+                1,
+                "Expected one replacecommit instant for full-table overwrite"
+            );
+
+            let rows_before_overwrite =
+                read_txn_rows_as_of(&hudi_table, &commits[1].timestamp).await?;
+            assert_eq!(
+                rows_before_overwrite,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700000000003),
+                    ("TXN-004".to_string(), "credit".to_string(), 1700000000004),
+                    ("TXN-005".to_string(), "debit".to_string(), 1700000000005),
+                    ("TXN-006".to_string(), "debit".to_string(), 1700000000006),
+                    ("TXN-007".to_string(), "debit".to_string(), 1700100000007),
+                    ("TXN-008".to_string(), "debit".to_string(), 1700100000008),
+                ]
+            );
+
+            let rows_as_of_replace =
+                read_txn_rows_as_of(&hudi_table, &replace_commits[0].timestamp).await?;
+            assert_eq!(
+                rows_as_of_replace,
+                vec![
+                    ("TXN-101".to_string(), "debit".to_string(), 1700500000001),
+                    ("TXN-102".to_string(), "debit".to_string(), 1700500000002),
+                    ("TXN-103".to_string(), "debit".to_string(), 1700500000003),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_nonpartitioned_rollback_mor_time_travel() -> Result<()> {
+            let base_url = SampleTable::V9NonpartitionedRollback.url_to_mor_avro();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let deltacommits = hudi_table
+                .timeline
+                .get_completed_deltacommits(false)
+                .await?;
+            assert_eq!(
+                deltacommits.len(),
+                2,
+                "Expected two completed deltacommit instants after rollback flow"
+            );
+
+            let rows_as_of_first_commit =
+                read_txn_rows_as_of(&hudi_table, &deltacommits[0].timestamp).await?;
+            assert_eq!(
+                rows_as_of_first_commit,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700000000003),
+                ]
+            );
+
+            let latest_rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                latest_rows,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700200000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700000000003),
+                ]
+            );
+            Ok(())
+        }
+    }
+}
+
 /// Test module for streaming read APIs.
 /// These tests verify the streaming versions of snapshot and file slice reads.
 mod streaming_queries {

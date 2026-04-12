@@ -701,6 +701,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_completed_replacecommits_v9_overwrite() {
+        let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
+        let timeline = create_test_timeline(base_url).await;
+
+        let commits = timeline.get_completed_commits(false).await.unwrap();
+        assert_eq!(commits.len(), 2);
+        for instant in &commits {
+            assert_eq!(instant.action, Action::Commit);
+            assert_eq!(instant.state, State::Completed);
+        }
+
+        let replacecommits = timeline.get_completed_replacecommits(false).await.unwrap();
+        assert_eq!(replacecommits.len(), 1);
+        for instant in &replacecommits {
+            assert_eq!(instant.action, Action::ReplaceCommit);
+            assert_eq!(instant.state, State::Completed);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_completed_deltacommits_v9_nonpartitioned_rollback() {
+        let base_url = SampleTable::V9NonpartitionedRollback.url_to_mor_avro();
+        let timeline = create_test_timeline(base_url).await;
+
+        let commits = timeline.get_completed_commits(false).await.unwrap();
+        assert!(
+            commits.is_empty(),
+            "Rollback MOR fixture should not contain completed commit instants"
+        );
+
+        let deltacommits = timeline.get_completed_deltacommits(false).await.unwrap();
+        assert_eq!(deltacommits.len(), 2);
+        for instant in &deltacommits {
+            assert_eq!(instant.action, Action::DeltaCommit);
+            assert_eq!(instant.state, State::Completed);
+        }
+    }
+
+    #[tokio::test]
     async fn test_get_commits_descending_order() {
         let base_url = SampleTable::V8Nonpartitioned.url_to_cow();
         let timeline = create_test_timeline(base_url).await;
