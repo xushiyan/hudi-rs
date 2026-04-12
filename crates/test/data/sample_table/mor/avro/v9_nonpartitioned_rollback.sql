@@ -81,7 +81,7 @@ INSERT INTO v9_nonpartitioned_rollback_mor VALUES
 -- Run: CALL show_commits(table => 'v9_nonpartitioned_rollback_mor', limit => 10);
 -- Find the instant_time of commit 1 and replace below.
 -- ============================================================================
-CALL rollback_to_instant(table => 'v9_nonpartitioned_rollback_mor', instant_time => '20260403184242950');
+CALL rollback_to_instant(table => 'v9_nonpartitioned_rollback_mor', instant_time => '<FIRST_COMMIT_INSTANT_TIME>');
 
 -- ============================================================================
 -- INSERT (commit 3): Add a record after rollback
