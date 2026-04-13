@@ -30,13 +30,13 @@ use crate::file_group::FileGroup;
 use crate::file_group::builder::file_groups_from_files_partition_records;
 use crate::file_group::file_slice::FileSlice;
 use crate::metadata::table::records::FilesPartitionRecord;
+use crate::statistics::estimator::FileStatsEstimator;
 use crate::storage::Storage;
 use crate::table::Table;
 use crate::table::file_pruner::FilePruner;
 use crate::table::listing::FileLister;
 use crate::table::partition::PartitionPruner;
 use crate::timeline::view::TimelineView;
-use crate::statistics::estimator::FileStatsEstimator;
 use dashmap::DashMap;
 
 /// A view of the Hudi table's data files (files stored outside the `.hoodie/` directory) in the file system. It provides APIs to load and
@@ -97,7 +97,10 @@ impl FileSystemView {
             0.0
         };
 
-        Ok(FileStatsEstimator::new(avg_row_size_on_disk, compression_ratio))
+        Ok(FileStatsEstimator::new(
+            avg_row_size_on_disk,
+            compression_ratio,
+        ))
     }
 
     /// Get or initialize the file stats estimator.
@@ -641,9 +644,7 @@ mod tests {
             )
         }
 
-        fn create_all_partitions_record(
-            partitions: Vec<&str>,
-        ) -> (String, FilesPartitionRecord) {
+        fn create_all_partitions_record(partitions: Vec<&str>) -> (String, FilesPartitionRecord) {
             let mut files_map = HashMap::new();
             for p in partitions {
                 files_map.insert(
@@ -678,16 +679,11 @@ mod tests {
 
             // Non-partitioned table: key is empty string
             let mut records = HashMap::new();
-            let (k, r) = create_files_record(
-                "",
-                vec![("abc-0_0-123_20231214.parquet", 1024, false)],
-            );
+            let (k, r) =
+                create_files_record("", vec![("abc-0_0-123_20231214.parquet", 1024, false)]);
             records.insert(k, r);
             let result = FileSystemView::find_sample_parquet_path_from_records(&records);
-            assert_eq!(
-                result,
-                Some("abc-0_0-123_20231214.parquet".to_string())
-            );
+            assert_eq!(result, Some("abc-0_0-123_20231214.parquet".to_string()));
         }
 
         #[test]
@@ -704,19 +700,13 @@ mod tests {
 
             // Only deleted parquet files
             let mut records = HashMap::new();
-            let (k, r) = create_files_record(
-                "p1",
-                vec![("deleted.parquet", 100, true)],
-            );
+            let (k, r) = create_files_record("p1", vec![("deleted.parquet", 100, true)]);
             records.insert(k, r);
             assert!(FileSystemView::find_sample_parquet_path_from_records(&records).is_none());
 
             // Only non-parquet files (log files)
             let mut records = HashMap::new();
-            let (k, r) = create_files_record(
-                "p1",
-                vec![(".abc-0_0-123.log.1_0-456", 200, false)],
-            );
+            let (k, r) = create_files_record("p1", vec![(".abc-0_0-123.log.1_0-456", 200, false)]);
             records.insert(k, r);
             assert!(FileSystemView::find_sample_parquet_path_from_records(&records).is_none());
         }

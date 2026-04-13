@@ -25,12 +25,12 @@ pub struct FileMetadata {
     /// Size in bytes on storage (compressed, on-disk)
     pub size: u64,
 
-    /// Estimated uncompressed size in bytes in memory.
-    /// Inferred from on-disk size and a sampled compression ratio.
+    /// Uncompressed size in bytes in memory.
+    /// Current implementation populates this using [core::statistics::estimator::FileSizeEstimator].
     pub byte_size: i64,
 
-    /// Estimated number of records in the file.
-    /// Inferred from on-disk size and a sampled average row size.
+    /// Number of records in the file.
+    /// Current implementation populates this using [core::statistics::estimator::FileSizeEstimator].
     pub num_records: i64,
 }
 
