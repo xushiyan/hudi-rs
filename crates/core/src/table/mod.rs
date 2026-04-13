@@ -906,7 +906,7 @@ impl Table {
                     estimated_total_byte_size as usize,
                 ))
             }
-            None => Some((0, total_on_disk_size as usize)),
+            None => None,
         }
     }
 }

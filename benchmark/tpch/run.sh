@@ -73,16 +73,16 @@ Commands:
   bench-datafusion  Run TPC-H queries against Hudi tables via DataFusion
   compare           Compare persisted benchmark results with bar charts
 
-Options:
-  --scale-factor N  TPC-H scale factor (default: $DEFAULT_SCALE_FACTOR)
-  --format F        Table format: hudi or parquet (default: auto)
-  --hudi-dir D      Hudi data directory or cloud URL (default: data/sf{N}-hudi)
-  --parquet-dir D   Parquet data directory or cloud URL (default: data/sf{N}-parquet)
-  --queries Q       Comma-separated query numbers (default: all 22)
-  --iterations N    Number of measured iterations per query (from config)
-  --warmup N        Number of unmeasured warmup iterations per query (from config)
-  --output-dir D    Directory to persist results as JSON (bench commands only)
-  --engines E       Comma-separated engine names to compare (compare command only)
+Options (per command):
+  --scale-factor N  TPC-H scale factor [all commands] (default: $DEFAULT_SCALE_FACTOR)
+  --format F        Table format: hudi or parquet [bench-*, compare] (default: auto)
+  --hudi-dir D      Hudi data directory or cloud URL [bench-*] (default: data/sf{N}-hudi)
+  --parquet-dir D   Parquet data directory or cloud URL [bench-*] (default: data/sf{N}-parquet)
+  --queries Q       Comma-separated query numbers [bench-*] (default: all 22)
+  --iterations N    Number of measured iterations per query [bench-*] (from config)
+  --warmup N        Number of unmeasured warmup iterations per query [bench-*] (from config)
+  --output-dir D    Directory to persist results as JSON [bench-*]
+  --engines E       Comma-separated engine names to compare [compare]
 
 Examples:
   $0 generate --scale-factor 1
