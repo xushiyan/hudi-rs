@@ -892,7 +892,7 @@ impl Table {
         }
 
         // Step 2: Use the cached estimator (or init it now).
-        // For non-Parquet tables (no sample file found), fall back to on-disk size.
+        // Returns None if no sample Parquet file is found or estimator fails to initialize.
         match self
             .file_system_view
             .get_or_init_estimator(sample_file_path.as_deref())
