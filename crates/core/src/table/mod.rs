@@ -1408,16 +1408,17 @@ mod tests {
         assert!(file_slice_2.log_files.is_empty());
 
         // Verify file metadata is populated for all file slices (issue #401)
-        for fsl in &file_slices {
-            let metadata = fsl
-                .base_file
-                .file_metadata
-                .as_ref()
-                .expect("file_metadata should be populated");
-            assert!(metadata.fully_populated);
-            assert!(metadata.num_records > 0);
-            assert!(metadata.size > 0);
-        }
+        let metadata_0 = file_slice_0.base_file.file_metadata.as_ref().unwrap();
+        assert!(metadata_0.fully_populated);
+        assert_eq!(metadata_0.num_records, 2);
+
+        let metadata_1 = file_slice_1.base_file.file_metadata.as_ref().unwrap();
+        assert!(metadata_1.fully_populated);
+        assert_eq!(metadata_1.num_records, 1);
+
+        let metadata_2 = file_slice_2.base_file.file_metadata.as_ref().unwrap();
+        assert!(metadata_2.fully_populated);
+        assert_eq!(metadata_2.num_records, 1);
     }
 
     #[tokio::test]
