@@ -103,7 +103,7 @@ use crate::config::read::HudiReadConfig;
 use crate::config::table::HudiTableConfig::PartitionFields;
 use crate::config::table::{HudiTableConfig, TableTypeValue};
 use crate::expr::filter::{Filter, from_str_tuples};
-use crate::file_group::file_slice::FileSlice;
+use crate::file_group::file_slice::{self, FileSlice};
 use crate::file_group::reader::FileGroupReader;
 use crate::keygen::is_timestamp_based_keygen;
 use crate::metadata::METADATA_TABLE_PARTITION_FIELD;
@@ -530,6 +530,8 @@ impl Table {
                 file_slices.push(file_slice.clone());
             }
         }
+
+        file_slice::load_metadata(&mut file_slices, &self.file_system_view.storage).await?;
 
         Ok(file_slices)
     }
@@ -1404,6 +1406,18 @@ mod tests {
             "de3550df-e12c-4591-9335-92ff992258a2-0"
         );
         assert!(file_slice_2.log_files.is_empty());
+
+        // Verify file metadata is populated for all file slices (issue #401)
+        for fsl in &file_slices {
+            let metadata = fsl
+                .base_file
+                .file_metadata
+                .as_ref()
+                .expect("file_metadata should be populated");
+            assert!(metadata.fully_populated);
+            assert!(metadata.num_records > 0);
+            assert!(metadata.size > 0);
+        }
     }
 
     #[tokio::test]

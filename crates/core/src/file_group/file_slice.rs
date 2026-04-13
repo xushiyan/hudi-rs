@@ -136,6 +136,15 @@ impl FileSlice {
     }
 }
 
+/// Load [crate::storage::file_metadata::FileMetadata] for all given [FileSlice]s that don't
+/// already have fully populated metadata.
+pub async fn load_metadata(file_slices: &mut [FileSlice], storage: &Storage) -> Result<()> {
+    for fsl in file_slices {
+        fsl.load_metadata_if_needed(storage).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

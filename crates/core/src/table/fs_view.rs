@@ -27,7 +27,7 @@ use crate::config::HudiConfigs;
 use crate::config::table::HudiTableConfig::BaseFileFormat;
 use crate::file_group::FileGroup;
 use crate::file_group::builder::file_groups_from_files_partition_records;
-use crate::file_group::file_slice::FileSlice;
+use crate::file_group::file_slice::{self, FileSlice};
 use crate::metadata::table::records::FilesPartitionRecord;
 use crate::storage::Storage;
 use crate::table::Table;
@@ -238,9 +238,7 @@ impl FileSystemView {
             }
         }
 
-        for fsl in &mut file_slices {
-            fsl.load_metadata_if_needed(&self.storage).await?;
-        }
+        file_slice::load_metadata(&mut file_slices, &self.storage).await?;
 
         Ok(file_slices)
     }
