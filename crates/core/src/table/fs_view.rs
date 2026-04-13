@@ -324,11 +324,50 @@ impl FileSystemView {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::expr::filter::Filter;
     use crate::table::Table;
 
     use hudi_test::SampleTable;
+
+    async fn file_slices_as_of(hudi_table: &Table, timestamp: &str) -> Vec<FileSlice> {
+        let fs_view = &hudi_table.file_system_view;
+        let timeline_view = hudi_table
+            .timeline
+            .create_view_as_of(timestamp)
+            .await
+            .unwrap();
+        let partition_pruner = PartitionPruner::empty();
+        let file_pruner = FilePruner::empty();
+        let table_schema = hudi_table.get_schema().await.unwrap();
+        fs_view
+            .get_file_slices(
+                &partition_pruner,
+                &file_pruner,
+                &table_schema,
+                &timeline_view,
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn partition_counts_as_of(
+        hudi_table: &Table,
+        timestamp: &str,
+    ) -> BTreeMap<String, usize> {
+        let file_slices = file_slices_as_of(hudi_table, timestamp).await;
+
+        let mut partition_counts = BTreeMap::new();
+        for file_slice in file_slices {
+            *partition_counts
+                .entry(file_slice.partition_path.clone())
+                .or_insert(0usize) += 1;
+        }
+        partition_counts
+    }
 
     #[tokio::test]
     async fn fs_view_get_latest_file_slices() {
@@ -380,25 +419,13 @@ mod tests {
 
         assert_eq!(fs_view.partition_to_file_groups.len(), 0);
 
-        let timeline_view = hudi_table
-            .timeline
-            .create_view_as_of(&latest_timestamp)
-            .await
-            .unwrap();
-        let partition_pruner = PartitionPruner::empty();
-        let file_pruner = FilePruner::empty();
-        let table_schema = hudi_table.get_schema().await.unwrap();
-
-        let file_slices = fs_view
-            .get_file_slices(
-                &partition_pruner,
-                &file_pruner,
-                &table_schema,
-                &timeline_view,
-                None,
-            )
-            .await
-            .unwrap();
+        let partition_counts = partition_counts_as_of(&hudi_table, &latest_timestamp).await;
+        assert_eq!(
+            partition_counts.values().sum::<usize>(),
+            1,
+            "Latest snapshot should have one surviving file slice after replacecommit pruning"
+        );
+        let file_slices = file_slices_as_of(&hudi_table, &latest_timestamp).await;
 
         assert_eq!(fs_view.partition_to_file_groups.len(), 3);
         assert_eq!(file_slices.len(), 1);
@@ -410,6 +437,48 @@ mod tests {
         for fsl in file_slices.iter() {
             assert_eq!(fsl.base_file.file_metadata.as_ref().unwrap().num_records, 1);
         }
+    }
+
+    #[tokio::test]
+    async fn fs_view_get_file_slices_with_v9_replace_commit() {
+        let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+        let latest_timestamp = hudi_table.timeline.get_latest_commit_timestamp().unwrap();
+        let latest_counts = partition_counts_as_of(&hudi_table, &latest_timestamp).await;
+        assert_eq!(
+            latest_counts,
+            BTreeMap::from([
+                ("apac".to_string(), 1usize),
+                ("eu".to_string(), 1usize),
+                ("us".to_string(), 1usize),
+            ])
+        );
+
+        let commits = hudi_table
+            .timeline
+            .get_completed_commits(false)
+            .await
+            .unwrap();
+        assert_eq!(commits.len(), 2);
+        let partition_counts = partition_counts_as_of(&hudi_table, &commits[1].timestamp).await;
+        assert_eq!(
+            partition_counts,
+            BTreeMap::from([
+                ("apac".to_string(), 1usize),
+                ("eu".to_string(), 2usize),
+                ("us".to_string(), 2usize),
+            ])
+        );
+
+        let replacecommits = hudi_table
+            .timeline
+            .get_completed_replacecommits(false)
+            .await
+            .unwrap();
+        assert_eq!(replacecommits.len(), 1);
+        let replace_counts =
+            partition_counts_as_of(&hudi_table, &replacecommits[0].timestamp).await;
+        assert_eq!(replace_counts, latest_counts);
     }
 
     #[tokio::test]

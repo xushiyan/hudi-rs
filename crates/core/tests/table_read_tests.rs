@@ -22,11 +22,24 @@
 //! organized by table version (v6, v8+) and query type.
 
 use arrow::compute::concat_batches;
+use arrow_array::RecordBatch;
+use futures::StreamExt;
+use futures::stream::BoxStream;
 use hudi_core::config::read::HudiReadConfig;
 use hudi_core::config::util::empty_filters;
 use hudi_core::error::Result;
 use hudi_core::table::Table;
 use hudi_test::{QuickstartTripsTable, SampleTable};
+
+async fn collect_stream_batches(
+    mut stream: BoxStream<'static, Result<RecordBatch>>,
+) -> Result<Vec<RecordBatch>> {
+    let mut batches = Vec::new();
+    while let Some(result) = stream.next().await {
+        batches.push(result?);
+    }
+    Ok(batches)
+}
 
 /// Test helper module for v6 tables (pre-1.0 spec)
 mod v6_tables {
@@ -573,14 +586,13 @@ mod v8_tables {
     /// Streaming query tests for v8 tables
     mod streaming_queries {
         use super::*;
-        use futures::StreamExt;
         use hudi_core::table::ReadOptions;
 
         #[tokio::test]
         async fn test_read_snapshot_stream_empty_table() -> Result<()> {
             let base_url = SampleTable::V8Empty.url_to_cow();
             let hudi_table = Table::new(base_url.path()).await?;
-            let options = ReadOptions::new();
+            let options = ReadOptions::new().with_projection(["txn_id", "txn_type", "txn_ts"]);
             let mut stream = hudi_table.read_snapshot_stream(&options).await?;
 
             // Collect all batches from stream
@@ -774,11 +786,622 @@ mod v8_tables {
     }
 }
 
+/// Test helper module for v9 tables (1.1 spec)
+mod v9_tables {
+    use super::*;
+    use arrow_array::{Int64Array, StringArray};
+
+    fn txn_rows(records: &[RecordBatch]) -> Vec<(String, String, i64)> {
+        let mut rows = Vec::new();
+        for record_batch in records {
+            let txn_ids = record_batch
+                .column_by_name("txn_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let txn_types = record_batch
+                .column_by_name("txn_type")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let txn_timestamps = record_batch
+                .column_by_name("txn_ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+
+            for i in 0..record_batch.num_rows() {
+                rows.push((
+                    txn_ids.value(i).to_string(),
+                    txn_types.value(i).to_string(),
+                    txn_timestamps.value(i),
+                ));
+            }
+        }
+        rows.sort_unstable();
+        rows
+    }
+
+    async fn read_txn_rows_from_snapshot(hudi_table: &Table) -> Result<Vec<(String, String, i64)>> {
+        let records = hudi_table.read_snapshot(empty_filters()).await?;
+        Ok(txn_rows(&records))
+    }
+
+    async fn read_txn_rows_as_of(
+        hudi_table: &Table,
+        timestamp: &str,
+    ) -> Result<Vec<(String, String, i64)>> {
+        let records = hudi_table
+            .read_snapshot_as_of(timestamp, empty_filters())
+            .await?;
+        Ok(txn_rows(&records))
+    }
+
+    async fn open_table(path: &str, use_read_optimized: bool) -> Result<Table> {
+        if use_read_optimized {
+            Table::new_with_options(
+                path,
+                [(HudiReadConfig::UseReadOptimizedMode.as_ref(), "true")],
+            )
+            .await
+        } else {
+            Table::new(path).await
+        }
+    }
+
+    mod snapshot_queries {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_timebasedkeygen_epochmillis_cow_snapshot() -> Result<()> {
+            let base_url = SampleTable::V9TimebasedkeygenEpochmillis.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-001".to_string(), "reversal".to_string(), 1700100000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700200000003),
+                    ("TXN-005".to_string(), "debit".to_string(), 1700100000005),
+                    ("TXN-006".to_string(), "transfer".to_string(), 1700100000006),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_timebasedkeygen_nonhivestyle_cow_snapshot() -> Result<()> {
+            let base_url = SampleTable::V9TimebasedkeygenNonhivestyle.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-001".to_string(), "reversal".to_string(), 1700100000001),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700200000003),
+                    ("TXN-004".to_string(), "transfer".to_string(), 1700000000004),
+                    ("TXN-005".to_string(), "debit".to_string(), 1700100000005),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_timebasedkeygen_unixtimestamp_cow_snapshot() -> Result<()> {
+            let base_url = SampleTable::V9TimebasedkeygenUnixtimestamp.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-001".to_string(), "reversal".to_string(), 1700100000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700200000003),
+                    ("TXN-005".to_string(), "debit".to_string(), 1700100000005),
+                    ("TXN-006".to_string(), "transfer".to_string(), 1700100000006),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_txns_simple_overwrite_cow_snapshot() -> Result<()> {
+            let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-101".to_string(), "debit".to_string(), 1700500000001),
+                    ("TXN-102".to_string(), "debit".to_string(), 1700500000002),
+                    ("TXN-103".to_string(), "debit".to_string(), 1700500000003),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_timebasedkeygen_nonhivestyle_mor_snapshot() -> Result<()> {
+            let base_url = SampleTable::V9TimebasedkeygenNonhivestyle.url_to_mor_avro();
+            let hudi_table = open_table(base_url.path(), true).await?;
+
+            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-001".to_string(), "reversal".to_string(), 1700100000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700000000003),
+                    ("TXN-004".to_string(), "transfer".to_string(), 1700000000004),
+                    ("TXN-005".to_string(), "debit".to_string(), 1700100000005),
+                    ("TXN-006".to_string(), "debit".to_string(), 1700300000006),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_txns_simple_overwrite_mor_snapshot() -> Result<()> {
+            let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_mor_avro();
+            let hudi_table = open_table(base_url.path(), true).await?;
+
+            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-101".to_string(), "debit".to_string(), 1700500000001),
+                    ("TXN-102".to_string(), "debit".to_string(), 1700500000002),
+                    ("TXN-103".to_string(), "debit".to_string(), 1700500000003),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_nonpartitioned_rollback_mor_snapshot() -> Result<()> {
+            let base_url = SampleTable::V9NonpartitionedRollback.url_to_mor_avro();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700200000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700000000003),
+                ]
+            );
+            Ok(())
+        }
+    }
+
+    mod time_travel_queries {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_txns_simple_overwrite_cow_time_travel() -> Result<()> {
+            let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let commits = hudi_table.timeline.get_completed_commits(false).await?;
+            let replace_commits = hudi_table
+                .timeline
+                .get_completed_replacecommits(false)
+                .await?;
+            assert_eq!(
+                commits.len(),
+                2,
+                "Expected two commit instants before overwrite"
+            );
+            assert_eq!(
+                replace_commits.len(),
+                1,
+                "Expected one replacecommit instant for full-table overwrite"
+            );
+
+            let rows_before_overwrite =
+                read_txn_rows_as_of(&hudi_table, &commits[1].timestamp).await?;
+            assert_eq!(
+                rows_before_overwrite,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700000000003),
+                    ("TXN-004".to_string(), "credit".to_string(), 1700000000004),
+                    ("TXN-005".to_string(), "debit".to_string(), 1700000000005),
+                    ("TXN-006".to_string(), "debit".to_string(), 1700000000006),
+                    ("TXN-007".to_string(), "debit".to_string(), 1700100000007),
+                    ("TXN-008".to_string(), "debit".to_string(), 1700100000008),
+                ]
+            );
+
+            let rows_as_of_replace =
+                read_txn_rows_as_of(&hudi_table, &replace_commits[0].timestamp).await?;
+            assert_eq!(
+                rows_as_of_replace,
+                vec![
+                    ("TXN-101".to_string(), "debit".to_string(), 1700500000001),
+                    ("TXN-102".to_string(), "debit".to_string(), 1700500000002),
+                    ("TXN-103".to_string(), "debit".to_string(), 1700500000003),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_nonpartitioned_rollback_mor_time_travel() -> Result<()> {
+            let base_url = SampleTable::V9NonpartitionedRollback.url_to_mor_avro();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let deltacommits = hudi_table
+                .timeline
+                .get_completed_deltacommits(false)
+                .await?;
+            assert_eq!(
+                deltacommits.len(),
+                2,
+                "Expected two completed deltacommit instants after rollback flow"
+            );
+
+            let rows_as_of_first_commit =
+                read_txn_rows_as_of(&hudi_table, &deltacommits[0].timestamp).await?;
+            assert_eq!(
+                rows_as_of_first_commit,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700000000003),
+                ]
+            );
+
+            let latest_rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            assert_eq!(
+                latest_rows,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700200000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700000000003),
+                ]
+            );
+            Ok(())
+        }
+    }
+
+    mod incremental_queries {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_txns_simple_overwrite_cow_incremental() -> Result<()> {
+            let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let commit_timestamps = hudi_table
+                .timeline
+                .completed_commits
+                .iter()
+                .map(|i| i.timestamp.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(commit_timestamps.len(), 3);
+            let first_commit = commit_timestamps[0];
+            let second_commit = commit_timestamps[1];
+            let third_commit = commit_timestamps[2];
+
+            let records = hudi_table
+                .read_incremental_records("19700101000000000", Some(first_commit))
+                .await?;
+            let rows = txn_rows(&records);
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700000000003),
+                    ("TXN-004".to_string(), "credit".to_string(), 1700000000004),
+                    ("TXN-005".to_string(), "debit".to_string(), 1700000000005),
+                    ("TXN-006".to_string(), "debit".to_string(), 1700000000006),
+                ],
+                "Should return rows inserted in the first commit"
+            );
+
+            let records = hudi_table
+                .read_incremental_records(first_commit, Some(second_commit))
+                .await?;
+            let rows = txn_rows(&records);
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-007".to_string(), "debit".to_string(), 1700100000007),
+                    ("TXN-008".to_string(), "debit".to_string(), 1700100000008),
+                ],
+                "Should return rows inserted in the second commit"
+            );
+
+            let records = hudi_table
+                .read_incremental_records(second_commit, Some(third_commit))
+                .await?;
+            let rows = txn_rows(&records);
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-101".to_string(), "debit".to_string(), 1700500000001),
+                    ("TXN-102".to_string(), "debit".to_string(), 1700500000002),
+                    ("TXN-103".to_string(), "debit".to_string(), 1700500000003),
+                ],
+                "Should return rows produced by replacecommit"
+            );
+
+            let records = hudi_table
+                .read_incremental_records(first_commit, None)
+                .await?;
+            let rows = txn_rows(&records);
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-101".to_string(), "debit".to_string(), 1700500000001),
+                    ("TXN-102".to_string(), "debit".to_string(), 1700500000002),
+                    ("TXN-103".to_string(), "debit".to_string(), 1700500000003),
+                ],
+                "Should return latest states since first commit, after replacecommit pruning"
+            );
+
+            let records = hudi_table
+                .read_incremental_records(third_commit, None)
+                .await?;
+            assert!(
+                records.is_empty(),
+                "Should return 0 records as third commit is latest"
+            );
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_nonpartitioned_rollback_mor_incremental() -> Result<()> {
+            let base_url = SampleTable::V9NonpartitionedRollback.url_to_mor_avro();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let deltacommits = hudi_table
+                .timeline
+                .get_completed_deltacommits(false)
+                .await?;
+            assert_eq!(deltacommits.len(), 2);
+            let first_commit = &deltacommits[0].timestamp;
+            let second_commit = &deltacommits[1].timestamp;
+
+            let records = hudi_table
+                .read_incremental_records("19700101000000000", Some(first_commit))
+                .await?;
+            let rows = txn_rows(&records);
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-001".to_string(), "debit".to_string(), 1700000000001),
+                    ("TXN-002".to_string(), "debit".to_string(), 1700000000002),
+                    ("TXN-003".to_string(), "debit".to_string(), 1700000000003),
+                ],
+                "Should return rows inserted in the first deltacommit"
+            );
+
+            let records = hudi_table
+                .read_incremental_records(first_commit, Some(second_commit))
+                .await?;
+            let rows = txn_rows(&records);
+            assert_eq!(
+                rows,
+                vec![("TXN-002".to_string(), "debit".to_string(), 1700200000002),],
+                "Should return rows changed after rollback in the second deltacommit"
+            );
+
+            let records = hudi_table
+                .read_incremental_records(first_commit, None)
+                .await?;
+            let rows = txn_rows(&records);
+            assert_eq!(
+                rows,
+                vec![("TXN-002".to_string(), "debit".to_string(), 1700200000002),],
+                "Should return latest rows changed since first deltacommit"
+            );
+
+            let records = hudi_table
+                .read_incremental_records(second_commit, None)
+                .await?;
+            assert!(
+                records.is_empty(),
+                "Should return 0 records as second deltacommit is latest"
+            );
+
+            Ok(())
+        }
+    }
+
+    mod streaming_queries {
+        use super::*;
+        use hudi_core::table::ReadOptions;
+
+        #[tokio::test]
+        async fn test_read_snapshot_stream_basic() -> Result<()> {
+            let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let options = ReadOptions::new();
+            let stream = hudi_table.read_snapshot_stream(&options).await?;
+            let batches = collect_stream_batches(stream).await?;
+
+            assert!(!batches.is_empty(), "Should produce at least one batch");
+
+            let rows = txn_rows(&batches);
+            assert_eq!(
+                rows,
+                vec![
+                    ("TXN-101".to_string(), "debit".to_string(), 1700500000001),
+                    ("TXN-102".to_string(), "debit".to_string(), 1700500000002),
+                    ("TXN-103".to_string(), "debit".to_string(), 1700500000003),
+                ]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_read_snapshot_stream_with_batch_size() -> Result<()> {
+            let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let options = ReadOptions::new().with_batch_size(1);
+            let stream = hudi_table.read_snapshot_stream(&options).await?;
+            let batches = collect_stream_batches(stream).await?;
+            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+            assert_eq!(total_rows, 3, "Total rows should match expected count");
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_read_snapshot_stream_with_partition_filters() -> Result<()> {
+            let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let options = ReadOptions::new().with_filters([("region", "=", "us")]);
+            let stream = hudi_table.read_snapshot_stream(&options).await?;
+            let batches = collect_stream_batches(stream).await?;
+
+            assert!(
+                !batches.is_empty(),
+                "Should produce at least one batch for the partition filter"
+            );
+            let rows = txn_rows(&batches);
+            assert_eq!(
+                rows,
+                vec![("TXN-101".to_string(), "debit".to_string(), 1700500000001)]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_read_snapshot_stream_with_non_matching_partition_filter() -> Result<()> {
+            let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let options = ReadOptions::new().with_filters([("region", "=", "latam")]);
+            let stream = hudi_table.read_snapshot_stream(&options).await?;
+            let batches = collect_stream_batches(stream).await?;
+
+            assert!(
+                batches.is_empty(),
+                "Non-matching filter should return no batches"
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_read_file_slice_stream_basic() -> Result<()> {
+            let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let file_slices = hudi_table.get_file_slices(empty_filters()).await?;
+            assert!(
+                !file_slices.is_empty(),
+                "Should have at least one file slice"
+            );
+
+            let options = ReadOptions::new();
+            let file_slice = &file_slices[0];
+            let stream = hudi_table
+                .read_file_slice_stream(file_slice, &options)
+                .await?;
+            let batches = collect_stream_batches(stream).await?;
+            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+            assert!(total_rows > 0, "Should read at least one row");
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_read_file_slice_stream_with_batch_size() -> Result<()> {
+            let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let file_slices = hudi_table.get_file_slices(empty_filters()).await?;
+            let file_slice = &file_slices[0];
+
+            let options = ReadOptions::new().with_batch_size(1);
+            let stream = hudi_table
+                .read_file_slice_stream(file_slice, &options)
+                .await?;
+            let batches = collect_stream_batches(stream).await?;
+            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+            assert!(total_rows > 0, "Should read at least one row");
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_read_snapshot_stream_mor_with_log_files() -> Result<()> {
+            // Test MOR table with log files in snapshot mode (non read-optimized)
+            // so streaming falls back to collect+merge.
+            let base_url = SampleTable::V9TimebasedkeygenNonhivestyle.url_to_mor_avro();
+            let hudi_table = open_table(base_url.path(), false).await?;
+
+            let file_slices = hudi_table.get_file_slices(empty_filters()).await?;
+            assert!(
+                file_slices
+                    .iter()
+                    .any(|file_slice| file_slice.has_log_file()),
+                "Expected at least one MOR file slice with log files"
+            );
+
+            let options = ReadOptions::new();
+            let stream = hudi_table.read_snapshot_stream(&options).await?;
+            let err = match collect_stream_batches(stream).await {
+                Ok(_) => panic!("Expected MOR streaming read with decimal log records to fail"),
+                Err(err) => err,
+            };
+            let err_message = err.to_string();
+            assert!(
+                err_message.contains("Decimal128(15, 2) not supported"),
+                "Unexpected error for MOR log-file streaming path: {err_message}"
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_read_snapshot_stream_mor_read_optimized() -> Result<()> {
+            let base_url = SampleTable::V9TimebasedkeygenNonhivestyle.url_to_mor_avro();
+            let hudi_table = open_table(base_url.path(), true).await?;
+
+            let options = ReadOptions::new();
+            let stream = hudi_table.read_snapshot_stream(&options).await?;
+            let batches = collect_stream_batches(stream).await?;
+
+            assert!(!batches.is_empty(), "Should produce batches from MOR table");
+            let rows = txn_rows(&batches);
+            assert_eq!(rows.len(), 7, "Should have 7 rows in read-optimized mode");
+            assert!(
+                rows.iter().any(|(txn_id, _, _)| txn_id == "TXN-006"),
+                "Expected record inserted after compaction to be present"
+            );
+            Ok(())
+        }
+    }
+}
+
 /// Test module for streaming read APIs.
 /// These tests verify the streaming versions of snapshot and file slice reads.
 mod streaming_queries {
     use super::*;
-    use arrow::record_batch::RecordBatch;
     use futures::StreamExt;
     use hudi_core::table::ReadOptions;
 
@@ -787,13 +1410,8 @@ mod streaming_queries {
         for base_url in SampleTable::V6Empty.urls() {
             let hudi_table = Table::new(base_url.path()).await?;
             let options = ReadOptions::new();
-            let mut stream = hudi_table.read_snapshot_stream(&options).await?;
-
-            // Collect all batches from stream
-            let mut batches = Vec::new();
-            while let Some(result) = stream.next().await {
-                batches.push(result?);
-            }
+            let stream = hudi_table.read_snapshot_stream(&options).await?;
+            let batches = collect_stream_batches(stream).await?;
             assert!(batches.is_empty(), "Empty table should produce no batches");
         }
         Ok(())
@@ -804,13 +1422,8 @@ mod streaming_queries {
         for base_url in SampleTable::V6Nonpartitioned.urls() {
             let hudi_table = Table::new(base_url.path()).await?;
             let options = ReadOptions::new();
-            let mut stream = hudi_table.read_snapshot_stream(&options).await?;
-
-            // Collect all batches from stream
-            let mut batches = Vec::new();
-            while let Some(result) = stream.next().await {
-                batches.push(result?);
-            }
+            let stream = hudi_table.read_snapshot_stream(&options).await?;
+            let batches = collect_stream_batches(stream).await?;
 
             assert!(!batches.is_empty(), "Should produce at least one batch");
 
@@ -839,13 +1452,8 @@ mod streaming_queries {
 
         // Request small batch size
         let options = ReadOptions::new().with_batch_size(1);
-        let mut stream = hudi_table.read_snapshot_stream(&options).await?;
-
-        // Collect all batches from stream
-        let mut batches = Vec::new();
-        while let Some(result) = stream.next().await {
-            batches.push(result?);
-        }
+        let stream = hudi_table.read_snapshot_stream(&options).await?;
+        let batches = collect_stream_batches(stream).await?;
 
         // With batch_size=1 and 4 rows, we expect multiple batches, but the
         // exact number depends on both the batch_size setting and the Parquet
@@ -865,13 +1473,8 @@ mod streaming_queries {
             ("byteField", "<", "20"),
             ("shortField", "!=", "100"),
         ]);
-        let mut stream = hudi_table.read_snapshot_stream(&options).await?;
-
-        // Collect all batches from stream
-        let mut batches = Vec::new();
-        while let Some(result) = stream.next().await {
-            batches.push(result?);
-        }
+        let stream = hudi_table.read_snapshot_stream(&options).await?;
+        let batches = collect_stream_batches(stream).await?;
 
         assert!(
             !batches.is_empty(),
@@ -899,15 +1502,10 @@ mod streaming_queries {
 
         let options = ReadOptions::new();
         let file_slice = &file_slices[0];
-        let mut stream = hudi_table
+        let stream = hudi_table
             .read_file_slice_stream(file_slice, &options)
             .await?;
-
-        // Collect all batches from stream
-        let mut batches = Vec::new();
-        while let Some(result) = stream.next().await {
-            batches.push(result?);
-        }
+        let batches = collect_stream_batches(stream).await?;
 
         assert!(!batches.is_empty(), "Should produce at least one batch");
 
@@ -927,14 +1525,10 @@ mod streaming_queries {
 
         // Test with small batch size
         let options = ReadOptions::new().with_batch_size(1);
-        let mut stream = hudi_table
+        let stream = hudi_table
             .read_file_slice_stream(file_slice, &options)
             .await?;
-
-        let mut batches = Vec::new();
-        while let Some(result) = stream.next().await {
-            batches.push(result?);
-        }
+        let batches = collect_stream_batches(stream).await?;
 
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 4, "Should read all 4 rows");
@@ -948,12 +1542,8 @@ mod streaming_queries {
         let hudi_table = Table::new(base_url.path()).await?;
 
         let options = ReadOptions::new();
-        let mut stream = hudi_table.read_snapshot_stream(&options).await?;
-
-        let mut batches = Vec::new();
-        while let Some(result) = stream.next().await {
-            batches.push(result?);
-        }
+        let stream = hudi_table.read_snapshot_stream(&options).await?;
+        let batches = collect_stream_batches(stream).await?;
 
         assert!(!batches.is_empty(), "Should produce batches from MOR table");
 
@@ -964,52 +1554,14 @@ mod streaming_queries {
     }
 
     #[tokio::test]
-    async fn test_read_snapshot_stream_successful_read() -> Result<()> {
-        // This test verifies that reading from a valid table succeeds without errors.
-        let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
-        let hudi_table = Table::new(base_url.path()).await?;
-
-        let options = ReadOptions::new();
-        let mut stream = hudi_table.read_snapshot_stream(&options).await?;
-
-        // All reads should succeed without error
-        while let Some(result) = stream.next().await {
-            assert!(result.is_ok(), "Reading should not produce errors");
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_read_snapshot_stream_empty_table_no_timestamp() -> Result<()> {
-        // For an empty table with no commit timestamp, streaming reads should return
-        // an empty stream (consistent with read_snapshot behavior).
-        let base_url = SampleTable::V6Empty.url_to_cow();
-        let hudi_table = Table::new(base_url.path()).await?;
-
-        let options = ReadOptions::new();
-        let mut stream = hudi_table.read_snapshot_stream(&options).await?;
-
-        let mut count = 0;
-        while (stream.next().await).is_some() {
-            count += 1;
-        }
-        assert_eq!(count, 0, "Empty table should produce no batches");
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_read_snapshot_stream_with_projection() -> Result<()> {
         let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
         let hudi_table = Table::new(base_url.path()).await?;
 
         // Only request id and name columns (not isActive)
         let options = ReadOptions::new().with_projection(["id", "name"]);
-        let mut stream = hudi_table.read_snapshot_stream(&options).await?;
-
-        let mut batches = Vec::new();
-        while let Some(result) = stream.next().await {
-            batches.push(result?);
-        }
+        let stream = hudi_table.read_snapshot_stream(&options).await?;
+        let batches = collect_stream_batches(stream).await?;
 
         assert!(!batches.is_empty(), "Should produce at least one batch");
 
@@ -1054,12 +1606,8 @@ mod streaming_queries {
             Ok(arr.clone())
         });
 
-        let mut stream = hudi_table.read_snapshot_stream(&options).await?;
-
-        let mut batches = Vec::new();
-        while let Some(result) = stream.next().await {
-            batches.push(result?);
-        }
+        let stream = hudi_table.read_snapshot_stream(&options).await?;
+        let batches = collect_stream_batches(stream).await?;
 
         assert!(!batches.is_empty(), "Should produce at least one batch");
 
@@ -1093,12 +1641,8 @@ mod streaming_queries {
                 Ok(arr.clone())
             });
 
-        let mut stream = hudi_table.read_snapshot_stream(&options).await?;
-
-        let mut batches = Vec::new();
-        while let Some(result) = stream.next().await {
-            batches.push(result?);
-        }
+        let stream = hudi_table.read_snapshot_stream(&options).await?;
+        let batches = collect_stream_batches(stream).await?;
 
         assert!(!batches.is_empty(), "Should produce at least one batch");
 
