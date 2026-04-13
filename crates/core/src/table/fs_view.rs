@@ -51,6 +51,14 @@ pub struct FileSystemView {
 }
 
 impl FileSystemView {
+    fn base_file_extension(&self) -> String {
+        self.hudi_configs.get_or_default(BaseFileFormat).into()
+    }
+
+    fn supports_footer_stats_estimation(base_file_extension: &str) -> bool {
+        base_file_extension.eq_ignore_ascii_case("parquet")
+    }
+
     pub async fn new(
         hudi_configs: Arc<HudiConfigs>,
         storage_options: Arc<HashMap<String, String>>,
@@ -66,7 +74,7 @@ impl FileSystemView {
     }
 
     /// Initialize the file stats estimator by reading a single Parquet footer.
-    async fn init_file_stats_estimator(
+    async fn init_parquet_file_stats_estimator(
         &self,
         relative_path: &str,
     ) -> crate::Result<FileStatsEstimator> {
@@ -108,10 +116,15 @@ impl FileSystemView {
         &self,
         sample_file_path: Option<&str>,
     ) -> Option<&FileStatsEstimator> {
+        let base_file_extension = self.base_file_extension();
+        if !Self::supports_footer_stats_estimation(&base_file_extension) {
+            return None;
+        }
+
         if let Some(path) = sample_file_path {
             match self
                 .file_stats_estimator
-                .get_or_try_init(|| self.init_file_stats_estimator(path))
+                .get_or_try_init(|| self.init_parquet_file_stats_estimator(path))
                 .await
             {
                 Ok(estimator) => Some(estimator),
@@ -125,16 +138,23 @@ impl FileSystemView {
         }
     }
 
-    /// Find a sample Parquet file path from metadata table records.
-    pub(crate) fn find_sample_parquet_path_from_records(
+    /// Find a sample base-file path from metadata table records.
+    pub(crate) fn find_sample_base_file_path_from_records(
         records: &HashMap<String, FilesPartitionRecord>,
+        base_file_extension: &str,
     ) -> Option<String> {
+        let extension_suffix = format!(".{}", base_file_extension.to_ascii_lowercase());
         for (key, record) in records {
             if record.is_all_partitions() {
                 continue;
             }
             for file_info in record.files.values() {
-                if !file_info.is_deleted && file_info.name.to_lowercase().ends_with(".parquet") {
+                if !file_info.is_deleted
+                    && file_info
+                        .name
+                        .to_ascii_lowercase()
+                        .ends_with(&extension_suffix)
+                {
                     return Some(if key.is_empty() {
                         file_info.name.clone()
                     } else {
@@ -173,17 +193,19 @@ impl FileSystemView {
         timeline_view: &TimelineView,
         files_partition_records: Option<&HashMap<String, FilesPartitionRecord>>,
     ) -> Result<()> {
+        let base_file_format = self.base_file_extension();
+
         // Step 1: Initialize the file stats estimator from MDT records if available.
-        // This reads ONE Parquet footer to derive compression ratio and avg row size,
-        // allowing the file group builder to populate estimated metadata inline.
+        // For Parquet tables, this reads ONE footer to derive compression ratio and
+        // avg row size, allowing the file group builder to populate estimated metadata inline.
         if let Some(records) = files_partition_records {
-            let sample_path = Self::find_sample_parquet_path_from_records(records);
+            let sample_path =
+                Self::find_sample_base_file_path_from_records(records, &base_file_format);
             self.get_or_init_estimator(sample_path.as_deref()).await;
         }
 
         // Step 2: Get file groups from appropriate source
         let file_groups_map = if let Some(records) = files_partition_records {
-            let base_file_format: String = self.hudi_configs.get_or_default(BaseFileFormat).into();
             file_groups_from_files_partition_records(
                 records,
                 &base_file_format,
@@ -230,7 +252,8 @@ impl FileSystemView {
     /// Returns the filtered list of file groups that pass the pruning check.
     /// Files are included (not pruned) if:
     /// - The pruner has no filters
-    /// - The file is not a Parquet file
+    /// - The table's base file format does not support footer stats
+    /// - The file does not match the configured base file extension
     /// - Column stats cannot be loaded (conservative behavior)
     /// - The file's stats indicate it might contain matching rows
     async fn apply_stats_pruning_from_footers(
@@ -243,6 +266,12 @@ impl FileSystemView {
         if file_pruner.is_empty() {
             return file_groups;
         }
+
+        let base_file_format = self.base_file_extension();
+        if !Self::supports_footer_stats_estimation(&base_file_format) {
+            return file_groups;
+        }
+        let base_file_suffix = format!(".{}", base_file_format.to_ascii_lowercase());
 
         let mut retained = Vec::with_capacity(file_groups.len());
 
@@ -259,8 +288,11 @@ impl FileSystemView {
                     }
                 };
 
-                // Case-insensitive check for .parquet extension
-                if !relative_path.to_lowercase().ends_with(".parquet") {
+                // Case-insensitive check for configured base file extension.
+                if !relative_path
+                    .to_ascii_lowercase()
+                    .ends_with(&base_file_suffix)
+                {
                     retained.push(fg);
                     continue;
                 }
@@ -617,7 +649,7 @@ mod tests {
         }
     }
 
-    mod test_find_sample_parquet_path {
+    mod test_find_sample_base_file_path {
         use super::*;
         use crate::metadata::table::records::{
             FilesPartitionRecord, HoodieMetadataFileInfo, MetadataRecordType,
@@ -663,7 +695,7 @@ mod tests {
         }
 
         #[test]
-        fn test_finds_parquet_in_partitioned_and_non_partitioned() {
+        fn test_finds_base_file_in_partitioned_and_non_partitioned() {
             // Partitioned table: key is the partition path
             let mut records = HashMap::new();
             let (k, r) = create_files_record(
@@ -671,7 +703,8 @@ mod tests {
                 vec![("abc-0_0-123_20231214.parquet", 1024, false)],
             );
             records.insert(k, r);
-            let result = FileSystemView::find_sample_parquet_path_from_records(&records);
+            let result =
+                FileSystemView::find_sample_base_file_path_from_records(&records, "parquet");
             assert_eq!(
                 result,
                 Some("city=chennai/abc-0_0-123_20231214.parquet".to_string())
@@ -682,33 +715,55 @@ mod tests {
             let (k, r) =
                 create_files_record("", vec![("abc-0_0-123_20231214.parquet", 1024, false)]);
             records.insert(k, r);
-            let result = FileSystemView::find_sample_parquet_path_from_records(&records);
+            let result =
+                FileSystemView::find_sample_base_file_path_from_records(&records, "parquet");
             assert_eq!(result, Some("abc-0_0-123_20231214.parquet".to_string()));
         }
 
         #[test]
-        fn test_returns_none_when_no_valid_parquet() {
+        fn test_finds_base_file_for_non_parquet_extension() {
+            let mut records = HashMap::new();
+            let (k, r) = create_files_record("partition-a", vec![("file-01.lance", 1024, false)]);
+            records.insert(k, r);
+            let result = FileSystemView::find_sample_base_file_path_from_records(&records, "lance");
+            assert_eq!(result, Some("partition-a/file-01.lance".to_string()));
+        }
+
+        #[test]
+        fn test_returns_none_when_no_valid_base_file() {
             // Empty records
             let records = HashMap::new();
-            assert!(FileSystemView::find_sample_parquet_path_from_records(&records).is_none());
+            assert!(
+                FileSystemView::find_sample_base_file_path_from_records(&records, "parquet")
+                    .is_none()
+            );
 
             // Only __all_partitions__ record
             let mut records = HashMap::new();
             let (k, r) = create_all_partitions_record(vec!["partition1"]);
             records.insert(k, r);
-            assert!(FileSystemView::find_sample_parquet_path_from_records(&records).is_none());
+            assert!(
+                FileSystemView::find_sample_base_file_path_from_records(&records, "parquet")
+                    .is_none()
+            );
 
             // Only deleted parquet files
             let mut records = HashMap::new();
             let (k, r) = create_files_record("p1", vec![("deleted.parquet", 100, true)]);
             records.insert(k, r);
-            assert!(FileSystemView::find_sample_parquet_path_from_records(&records).is_none());
+            assert!(
+                FileSystemView::find_sample_base_file_path_from_records(&records, "parquet")
+                    .is_none()
+            );
 
             // Only non-parquet files (log files)
             let mut records = HashMap::new();
             let (k, r) = create_files_record("p1", vec![(".abc-0_0-123.log.1_0-456", 200, false)]);
             records.insert(k, r);
-            assert!(FileSystemView::find_sample_parquet_path_from_records(&records).is_none());
+            assert!(
+                FileSystemView::find_sample_base_file_path_from_records(&records, "parquet")
+                    .is_none()
+            );
         }
     }
 }

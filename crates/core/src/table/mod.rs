@@ -849,8 +849,8 @@ impl Table {
     ///
     /// The approach:
     /// 1. Read MDT files partition to get all active base files with on-disk sizes
-    /// 2. Read ONE Parquet footer from a sampled file to derive compression ratio
-    /// 3. Infer total rows and uncompressed byte size for all base files
+    /// 2. For Parquet tables, read ONE sampled footer to derive a compression ratio
+    /// 3. Infer total rows and byte size for all base files
     ///
     /// Only base files are counted (log files are excluded).
     ///
@@ -885,14 +885,15 @@ impl Table {
             .filter(|(name, _)| name.ends_with(&base_file_suffix))
             .map(|(_, size)| size)
             .sum();
-        let sample_file_path = FileSystemView::find_sample_parquet_path_from_records(&records);
+        let sample_file_path =
+            FileSystemView::find_sample_base_file_path_from_records(&records, &base_file_format);
 
         if total_on_disk_size == 0 {
             return Some((0, 0));
         }
 
         // Step 2: Use the cached estimator (or init it now).
-        // Returns None if no sample Parquet file is found or estimator fails to initialize.
+        // Return None if no sample file is found or estimator fails to initialize.
         match self
             .file_system_view
             .get_or_init_estimator(sample_file_path.as_deref())

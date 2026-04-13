@@ -147,9 +147,9 @@ impl HudiDataSource {
         };
 
         // Compute table-level statistics for join ordering and broadcast decisions.
-        // Uses MDT files partition + latest commit stats + 1 Parquet footer to infer
-        // row counts and byte sizes without loading all file groups.
-        // Falls back to None if metadata table is not enabled.
+        // Uses MDT files partition for base-file sizes and, for Parquet tables, one
+        // sampled footer to infer row counts and byte sizes without loading all file groups.
+        // Falls back to None if statistics cannot be derived.
         let cached_stats = match table.compute_table_stats().await {
             Some((num_rows, total_byte_size)) => {
                 let num_fields = schema.fields().len();
