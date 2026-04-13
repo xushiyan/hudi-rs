@@ -613,4 +613,112 @@ mod tests {
             assert!(metadata.size > 0);
         }
     }
+
+    mod test_find_sample_parquet_path {
+        use super::*;
+        use crate::metadata::table::records::{
+            FilesPartitionRecord, HoodieMetadataFileInfo, MetadataRecordType,
+        };
+
+        fn create_files_record(
+            key: &str,
+            files: Vec<(&str, i64, bool)>,
+        ) -> (String, FilesPartitionRecord) {
+            let mut files_map = HashMap::new();
+            for (name, size, is_deleted) in files {
+                files_map.insert(
+                    name.to_string(),
+                    HoodieMetadataFileInfo::new(name.to_string(), size, is_deleted),
+                );
+            }
+            (
+                key.to_string(),
+                FilesPartitionRecord {
+                    key: key.to_string(),
+                    record_type: MetadataRecordType::Files,
+                    files: files_map,
+                },
+            )
+        }
+
+        fn create_all_partitions_record(
+            partitions: Vec<&str>,
+        ) -> (String, FilesPartitionRecord) {
+            let mut files_map = HashMap::new();
+            for p in partitions {
+                files_map.insert(
+                    p.to_string(),
+                    HoodieMetadataFileInfo::new(p.to_string(), 0, false),
+                );
+            }
+            (
+                FilesPartitionRecord::ALL_PARTITIONS_KEY.to_string(),
+                FilesPartitionRecord {
+                    key: FilesPartitionRecord::ALL_PARTITIONS_KEY.to_string(),
+                    record_type: MetadataRecordType::AllPartitions,
+                    files: files_map,
+                },
+            )
+        }
+
+        #[test]
+        fn test_finds_parquet_in_partitioned_and_non_partitioned() {
+            // Partitioned table: key is the partition path
+            let mut records = HashMap::new();
+            let (k, r) = create_files_record(
+                "city=chennai",
+                vec![("abc-0_0-123_20231214.parquet", 1024, false)],
+            );
+            records.insert(k, r);
+            let result = FileSystemView::find_sample_parquet_path_from_records(&records);
+            assert_eq!(
+                result,
+                Some("city=chennai/abc-0_0-123_20231214.parquet".to_string())
+            );
+
+            // Non-partitioned table: key is empty string
+            let mut records = HashMap::new();
+            let (k, r) = create_files_record(
+                "",
+                vec![("abc-0_0-123_20231214.parquet", 1024, false)],
+            );
+            records.insert(k, r);
+            let result = FileSystemView::find_sample_parquet_path_from_records(&records);
+            assert_eq!(
+                result,
+                Some("abc-0_0-123_20231214.parquet".to_string())
+            );
+        }
+
+        #[test]
+        fn test_returns_none_when_no_valid_parquet() {
+            // Empty records
+            let records = HashMap::new();
+            assert!(FileSystemView::find_sample_parquet_path_from_records(&records).is_none());
+
+            // Only __all_partitions__ record
+            let mut records = HashMap::new();
+            let (k, r) = create_all_partitions_record(vec!["partition1"]);
+            records.insert(k, r);
+            assert!(FileSystemView::find_sample_parquet_path_from_records(&records).is_none());
+
+            // Only deleted parquet files
+            let mut records = HashMap::new();
+            let (k, r) = create_files_record(
+                "p1",
+                vec![("deleted.parquet", 100, true)],
+            );
+            records.insert(k, r);
+            assert!(FileSystemView::find_sample_parquet_path_from_records(&records).is_none());
+
+            // Only non-parquet files (log files)
+            let mut records = HashMap::new();
+            let (k, r) = create_files_record(
+                "p1",
+                vec![(".abc-0_0-123.log.1_0-456", 200, false)],
+            );
+            records.insert(k, r);
+            assert!(FileSystemView::find_sample_parquet_path_from_records(&records).is_none());
+        }
+    }
 }

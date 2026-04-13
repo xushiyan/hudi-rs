@@ -1186,6 +1186,38 @@ mod tests {
 
             assert_eq!(file_groups_map.len(), 1);
         }
+
+        #[test]
+        fn test_with_estimator_populates_file_metadata() {
+            use crate::statistics::estimator::FileStatsEstimator;
+
+            let mut records = HashMap::new();
+            let (key, record) = create_files_record(
+                "partition1",
+                vec![("file-id-0_0-7-24_20240418173200000.parquet", 5000, false)],
+            );
+            records.insert(key, record);
+
+            // 250 bytes/row on disk, 2.0x compression ratio
+            let estimator = FileStatsEstimator::new(250.0, 2.0);
+            let result = file_groups_from_files_partition_records(
+                &records,
+                "parquet",
+                &create_layout_v1_view(),
+                Some(&estimator),
+            );
+            assert!(result.is_ok());
+            let file_groups_map = result.unwrap();
+            assert_eq!(file_groups_map.len(), 1);
+
+            let file_groups = file_groups_map.get("partition1").unwrap();
+            let fg = &file_groups[0];
+            let (_, file_slice) = fg.file_slices.iter().next().unwrap();
+            let metadata = file_slice.base_file.file_metadata.as_ref().unwrap();
+            assert_eq!(metadata.size, 5000); // on-disk size
+            assert_eq!(metadata.byte_size, 10000); // 5000 * 2.0
+            assert_eq!(metadata.num_records, 20); // 5000 / 250
+        }
     }
 
     mod test_replaced_file_groups_from_replace_commit {

@@ -46,3 +46,38 @@ impl FileStatsEstimator {
         (byte_size, num_records)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_estimate_normal() {
+        // 100 bytes/row on disk, 2.5x compression ratio
+        let estimator = FileStatsEstimator::new(100.0, 2.5);
+        let (byte_size, num_records) = estimator.estimate(1000);
+        assert_eq!(byte_size, 2500); // 1000 * 2.5
+        assert_eq!(num_records, 10); // 1000 / 100
+
+        // No compression (ratio = 1.0)
+        let estimator = FileStatsEstimator::new(200.0, 1.0);
+        let (byte_size, num_records) = estimator.estimate(2000);
+        assert_eq!(byte_size, 2000); // same as on-disk
+        assert_eq!(num_records, 10); // 2000 / 200
+    }
+
+    #[test]
+    fn test_estimate_edge_cases() {
+        // Zero avg_row_size → num_records should be 0
+        let estimator = FileStatsEstimator::new(0.0, 2.0);
+        let (byte_size, num_records) = estimator.estimate(500);
+        assert_eq!(byte_size, 1000);
+        assert_eq!(num_records, 0);
+
+        // Zero size file
+        let estimator = FileStatsEstimator::new(100.0, 2.0);
+        let (byte_size, num_records) = estimator.estimate(0);
+        assert_eq!(byte_size, 0);
+        assert_eq!(num_records, 0);
+    }
+}
