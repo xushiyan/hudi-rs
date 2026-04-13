@@ -1681,4 +1681,45 @@ mod tests {
         let stats = table.compute_table_stats().await;
         assert!(stats.is_none(), "Stats should be None for non-MDT table");
     }
+
+    #[tokio::test]
+    async fn test_clone_table_with_mdt() {
+        let base_url = SampleTable::V9TxnsNonpartMeta.url_to_mor_avro();
+        let table = Table::new(base_url.path()).await.unwrap();
+        assert!(table.is_metadata_table_enabled());
+
+        let cloned = table.clone();
+        assert_eq!(cloned.table_name(), table.table_name());
+        assert_eq!(cloned.table_type(), table.table_type());
+
+        // Clone shares the cached metadata table via Arc<OnceCell>
+        let file_slices = cloned.get_file_slices(empty_filters()).await.unwrap();
+        assert!(!file_slices.is_empty());
+
+        // compute_table_stats works on cloned table
+        let stats = cloned.compute_table_stats().await;
+        assert!(stats.is_some());
+        let (rows, bytes) = stats.unwrap();
+        assert!(rows > 0);
+        assert!(bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_slices_with_mdt() {
+        let base_url = SampleTable::V9TxnsSimpleMeta.url_to_cow();
+        let table = Table::new(base_url.path()).await.unwrap();
+        assert!(table.is_metadata_table_enabled());
+
+        // This exercises the MDT code path in get_file_slices_internal:
+        // metadata table init, fetch_files_partition_records, and
+        // fs_view's load_file_groups with estimator
+        let file_slices = table.get_file_slices(empty_filters()).await.unwrap();
+        assert!(!file_slices.is_empty());
+
+        // Verify file metadata is populated from MDT with estimated stats
+        for fsl in &file_slices {
+            let metadata = fsl.base_file.file_metadata.as_ref().unwrap();
+            assert!(metadata.size > 0);
+        }
+    }
 }

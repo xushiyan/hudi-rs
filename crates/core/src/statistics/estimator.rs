@@ -17,8 +17,10 @@
  * under the License.
  */
 
-/// Cached ratios derived from a single Parquet footer sample.
+/// Cached ratios derived from a single base file sample.
 /// Used to estimate `byte_size` and `num_records` for all files.
+///
+/// TODO: this assumes base file format is Parquet. It should support other base file format as the table supports.
 #[derive(Clone, Debug)]
 pub(crate) struct FileStatsEstimator {
     /// Average row size on disk in bytes (compressed).
