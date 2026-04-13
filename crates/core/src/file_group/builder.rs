@@ -25,7 +25,7 @@ use crate::metadata::commit::HoodieCommitMetadata;
 use crate::metadata::replace_commit::HoodieReplaceCommitMetadata;
 use crate::metadata::table_record::FilesPartitionRecord;
 use crate::storage::file_metadata::FileMetadata;
-use crate::table::fs_view::FileStatsEstimator;
+use crate::statistics::estimator::FileStatsEstimator;
 use crate::timeline::completion_time::CompletionTimeView;
 use dashmap::DashMap;
 use serde_json::{Map, Value};

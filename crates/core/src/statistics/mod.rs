@@ -28,6 +28,8 @@
 //! Min/max values are stored as single-element Arrow arrays (`ArrayRef`), enabling
 //! direct comparison using `arrow_ord::cmp` functions without custom enum types.
 
+pub(crate) mod estimator;
+
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;

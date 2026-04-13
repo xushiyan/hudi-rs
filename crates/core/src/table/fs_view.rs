@@ -36,30 +36,8 @@ use crate::table::file_pruner::FilePruner;
 use crate::table::listing::FileLister;
 use crate::table::partition::PartitionPruner;
 use crate::timeline::view::TimelineView;
+use crate::statistics::estimator::FileStatsEstimator;
 use dashmap::DashMap;
-
-/// Cached ratios derived from a single Parquet footer sample.
-/// Used to estimate `byte_size` and `num_records` for all files.
-#[derive(Clone, Debug)]
-pub(crate) struct FileStatsEstimator {
-    /// Average row size on disk in bytes (compressed).
-    avg_row_size_on_disk: f64,
-    /// Ratio of uncompressed to compressed size.
-    compression_ratio: f64,
-}
-
-impl FileStatsEstimator {
-    /// Estimate metadata fields from on-disk size.
-    pub(crate) fn estimate(&self, size: u64) -> (i64, i64) {
-        let byte_size = (size as f64 * self.compression_ratio) as i64;
-        let num_records = if self.avg_row_size_on_disk > 0.0 {
-            (size as f64 / self.avg_row_size_on_disk) as i64
-        } else {
-            0
-        };
-        (byte_size, num_records)
-    }
-}
 
 /// A view of the Hudi table's data files (files stored outside the `.hoodie/` directory) in the file system. It provides APIs to load and
 /// access the file groups and file slices.
@@ -119,10 +97,7 @@ impl FileSystemView {
             0.0
         };
 
-        Ok(FileStatsEstimator {
-            avg_row_size_on_disk,
-            compression_ratio,
-        })
+        Ok(FileStatsEstimator::new(avg_row_size_on_disk, compression_ratio))
     }
 
     /// Get or initialize the file stats estimator.
