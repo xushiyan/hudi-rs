@@ -873,8 +873,7 @@ mod tests {
         assert!(result.is_err(), "Should return error for non-existent file");
 
         let error_msg = result
-            .err()
-            .expect("Expected file not found error")
+            .expect_err("Expected file not found error")
             .to_string();
         assert!(
             error_msg.contains("not found") || error_msg.contains("Failed to read path"),
@@ -963,10 +962,11 @@ mod tests {
             "Expected fail-fast for non-parquet base format"
         );
 
-        let error_msg = result
-            .err()
-            .expect("Expected fail-fast error for non-parquet format")
-            .to_string();
+        let error = match result {
+            Ok(_) => panic!("Expected fail-fast error for non-parquet format"),
+            Err(error) => error,
+        };
+        let error_msg = error.to_string();
         assert!(
             error_msg.contains("Unsupported base file format 'hfile'"),
             "Expected explicit base format error, got: {error_msg}"
@@ -1032,10 +1032,11 @@ mod tests {
             "Expected fail-fast for non-parquet base format"
         );
 
-        let error_msg = result
-            .err()
-            .expect("Expected fail-fast error for non-parquet format")
-            .to_string();
+        let error = match result {
+            Ok(_) => panic!("Expected fail-fast error for non-parquet format"),
+            Err(error) => error,
+        };
+        let error_msg = error.to_string();
         assert!(
             error_msg.contains("Unsupported base file format 'hfile'"),
             "Expected explicit base format error, got: {error_msg}"

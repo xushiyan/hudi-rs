@@ -164,6 +164,10 @@ impl HudiDataSource {
         let cached_stats = match table.compute_table_stats().await {
             Some((num_rows, total_byte_size)) => {
                 let num_fields = schema.fields().len();
+                // Saturate on 32-bit targets where `u64` cannot fit into `usize`;
+                // on 64-bit this is a lossless conversion.
+                let num_rows = usize::try_from(num_rows).unwrap_or(usize::MAX);
+                let total_byte_size = usize::try_from(total_byte_size).unwrap_or(usize::MAX);
                 Some(Statistics {
                     num_rows: Precision::Inexact(num_rows),
                     total_byte_size: Precision::Inexact(total_byte_size),
@@ -559,7 +563,9 @@ mod tests {
             Url::from_file_path(canonicalize(Path::new("tests/data/table_props_valid")).unwrap())
                 .unwrap();
         let hudi = HudiDataSource::new(base_url.as_str()).await.unwrap();
-        assert_eq!(hudi.get_input_partitions(), 0)
+        assert_eq!(hudi.get_input_partitions(), 0);
+        assert_eq!(hudi.table_type(), TableType::Base);
+        assert_eq!(hudi.statistics(), None);
     }
 
     #[tokio::test]

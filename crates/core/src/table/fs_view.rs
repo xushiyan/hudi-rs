@@ -150,28 +150,39 @@ impl FileSystemView {
     }
 
     /// Find a sample base-file path from metadata table records.
+    ///
+    /// Selects the lexicographically-smallest matching path so the sampled file is
+    /// stable across runs. Stable selection keeps the derived compression ratio and
+    /// the resulting query plan reproducible.
     pub(crate) fn find_sample_base_file_path_from_records(
         records: &HashMap<String, FilesPartitionRecord>,
         base_file_format: &BaseFileFormatValue,
     ) -> Option<String> {
         let extension_suffix = format!(".{}", base_file_format.as_ref());
+        let mut best_candidate: Option<String> = None;
+
         for (key, record) in records {
             if record.is_all_partitions() {
                 continue;
             }
             for file_info in record.files.values() {
-                if !file_info.is_deleted
-                    && Self::ends_with_ignore_ascii_case(&file_info.name, &extension_suffix)
+                if file_info.is_deleted
+                    || !Self::ends_with_ignore_ascii_case(&file_info.name, &extension_suffix)
                 {
-                    return Some(if key.is_empty() {
-                        file_info.name.clone()
-                    } else {
-                        format!("{key}/{}", file_info.name)
-                    });
+                    continue;
+                }
+                let candidate = if key.is_empty() {
+                    file_info.name.clone()
+                } else {
+                    format!("{key}/{}", file_info.name)
+                };
+                if best_candidate.as_ref().is_none_or(|best| candidate < *best) {
+                    best_candidate = Some(candidate);
                 }
             }
         }
-        None
+
+        best_candidate
     }
 
     /// Load file groups from the appropriate source (storage or metadata table records)
@@ -445,12 +456,28 @@ impl FileSystemView {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::path::Path;
+    use std::sync::Arc;
 
     use super::*;
+    use crate::config::HudiConfigs;
+    use crate::config::table::BaseFileFormatValue;
+    use crate::config::table::HudiTableConfig::BasePath;
     use crate::expr::filter::Filter;
+    use crate::file_group::FileGroup;
+    use crate::metadata::table::records::{
+        FilesPartitionRecord, HoodieMetadataFileInfo, MetadataRecordType,
+    };
     use crate::table::Table;
+    use arrow_array::{Int64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+    use tempfile::tempdir;
+    use url::Url;
 
-    use hudi_test::SampleTable;
+    use hudi_test::{QuickstartTripsTable, SampleTable};
 
     async fn file_slices_as_of(hudi_table: &Table, timestamp: &str) -> Vec<FileSlice> {
         let fs_view = &hudi_table.file_system_view;
@@ -487,6 +514,131 @@ mod tests {
                 .or_insert(0usize) += 1;
         }
         partition_counts
+    }
+
+    fn write_single_row_parquet_file(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1_i64]))],
+        )
+        .unwrap();
+
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    fn write_empty_parquet_file(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let file = File::create(path).unwrap();
+        let writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.close().unwrap();
+    }
+
+    async fn new_fs_view_with_base_path_and_format(
+        base_url: &Url,
+        base_file_format: &str,
+    ) -> FileSystemView {
+        let hudi_configs = Arc::new(HudiConfigs::new([
+            (BasePath.as_ref(), base_url.as_str()),
+            (BaseFileFormat.as_ref(), base_file_format),
+        ]));
+        FileSystemView::new(hudi_configs, Arc::new(HashMap::new()))
+            .await
+            .unwrap()
+    }
+
+    async fn new_fs_view_with_base_path(base_url: &Url) -> FileSystemView {
+        new_fs_view_with_base_path_and_format(base_url, BaseFileFormatValue::Parquet.as_ref()).await
+    }
+
+    fn create_files_partition_record(
+        partition_key: &str,
+        file_name: &str,
+        file_size: i64,
+    ) -> (String, FilesPartitionRecord) {
+        let mut files = HashMap::new();
+        files.insert(
+            file_name.to_string(),
+            HoodieMetadataFileInfo::new(file_name.to_string(), file_size, false),
+        );
+        (
+            partition_key.to_string(),
+            FilesPartitionRecord {
+                key: partition_key.to_string(),
+                record_type: MetadataRecordType::Files,
+                files,
+            },
+        )
+    }
+
+    async fn build_file_pruning_context(
+        filter: (&str, &str, &str),
+    ) -> (Table, Schema, FilePruner, String) {
+        let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+        let table_schema = hudi_table.get_schema().await.unwrap();
+        let partition_schema = hudi_table.get_partition_schema().await.unwrap();
+        let filters = vec![Filter::try_from(filter).unwrap()];
+        let file_pruner = FilePruner::new(&filters, &table_schema, &partition_schema).unwrap();
+        let as_of = hudi_table.timeline.get_latest_commit_timestamp().unwrap();
+        (hudi_table, table_schema, file_pruner, as_of)
+    }
+
+    #[tokio::test]
+    async fn fs_view_init_estimator_handles_success_and_edge_cases() {
+        let temp_dir = tempdir().unwrap();
+        let base_url = Url::from_directory_path(temp_dir.path()).unwrap();
+        let fs_view = new_fs_view_with_base_path(&base_url).await;
+
+        let sample_path = temp_dir.path().join("sample.parquet");
+        write_single_row_parquet_file(&sample_path);
+        let estimator = fs_view
+            .init_parquet_file_stats_estimator("sample.parquet")
+            .await
+            .unwrap();
+        let (_, rows) = estimator.estimate(1024);
+        assert!(rows > 0);
+
+        let empty_path = temp_dir.path().join("empty.parquet");
+        write_empty_parquet_file(&empty_path);
+        let empty_estimator = fs_view
+            .init_parquet_file_stats_estimator("empty.parquet")
+            .await
+            .unwrap();
+        let (estimated_size, estimated_rows) = empty_estimator.estimate(1024);
+        assert_eq!(estimated_size, 1024);
+        assert_eq!(estimated_rows, 0);
+    }
+
+    #[tokio::test]
+    async fn fs_view_get_or_init_estimator_handles_non_parquet_and_errors() {
+        let temp_dir = tempdir().unwrap();
+        let base_url = Url::from_directory_path(temp_dir.path()).unwrap();
+        let fs_view = new_fs_view_with_base_path(&base_url).await;
+
+        assert!(
+            fs_view
+                .get_or_init_estimator(&BaseFileFormatValue::HFile, Some("any.hfile"))
+                .await
+                .is_none()
+        );
+        assert!(
+            fs_view
+                .get_or_init_estimator(&BaseFileFormatValue::Parquet, Some("missing.parquet"))
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -604,6 +756,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fs_view_load_file_groups_from_metadata_records() {
+        let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+        let latest_timestamp = hudi_table.timeline.get_latest_commit_timestamp().unwrap();
+        let timeline_view = hudi_table
+            .timeline
+            .create_view_as_of(&latest_timestamp)
+            .await
+            .unwrap();
+        let partition_pruner = PartitionPruner::empty();
+        let file_pruner = FilePruner::empty();
+        let table_schema = hudi_table.get_schema().await.unwrap();
+        let file_name =
+            "a079bdb3-731c-4894-b855-abfcd6921007-0_0-203-274_20240418173551906.parquet";
+        let records = HashMap::from([create_files_partition_record("", file_name, 1024)]);
+
+        hudi_table
+            .file_system_view
+            .load_file_groups(
+                &partition_pruner,
+                &file_pruner,
+                &table_schema,
+                &timeline_view,
+                Some(&records),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !hudi_table
+                .file_system_view
+                .partition_to_file_groups
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_view_apply_stats_pruning_returns_early_for_non_parquet_base_format() {
+        let temp_dir = tempdir().unwrap();
+        let base_url = Url::from_directory_path(temp_dir.path()).unwrap();
+        let fs_view =
+            new_fs_view_with_base_path_and_format(&base_url, BaseFileFormatValue::HFile.as_ref())
+                .await;
+
+        let table_base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let table = Table::new(table_base_url.path()).await.unwrap();
+        let table_schema = table.get_schema().await.unwrap();
+        let partition_schema = table.get_partition_schema().await.unwrap();
+        let filters = vec![Filter::try_from(("intField", ">=", "0")).unwrap()];
+        let file_pruner = FilePruner::new(&filters, &table_schema, &partition_schema).unwrap();
+        assert!(!file_pruner.is_empty());
+        let as_of = table.timeline.get_latest_commit_timestamp().unwrap();
+
+        let file_group =
+            FileGroup::new_with_base_file_name("fileid_0-0-1_20240418173551906.parquet", "")
+                .unwrap();
+        let retained = fs_view
+            .apply_stats_pruning_from_footers(vec![file_group], &file_pruner, &table_schema, &as_of)
+            .await;
+
+        assert_eq!(retained.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fs_view_apply_stats_pruning_keeps_non_matching_extension_files() {
+        let (table, table_schema, file_pruner, as_of) =
+            build_file_pruning_context(("intField", ">=", "0")).await;
+
+        let file_group =
+            FileGroup::new_with_base_file_name("fileid_0-0-1_20240418173551906.hfile", "").unwrap();
+        let retained = table
+            .file_system_view
+            .apply_stats_pruning_from_footers(vec![file_group], &file_pruner, &table_schema, &as_of)
+            .await;
+
+        assert_eq!(retained.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fs_view_get_file_slices_with_non_empty_file_pruner() {
+        let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+        let latest_timestamp = hudi_table.timeline.get_latest_commit_timestamp().unwrap();
+        let timeline_view = hudi_table
+            .timeline
+            .create_view_as_of(&latest_timestamp)
+            .await
+            .unwrap();
+        let partition_schema = hudi_table.get_partition_schema().await.unwrap();
+        let table_schema = hudi_table.get_schema().await.unwrap();
+        let filters = vec![Filter::try_from(("intField", ">=", "0")).unwrap()];
+        let partition_pruner = PartitionPruner::new(
+            &filters,
+            &partition_schema,
+            hudi_table.hudi_configs.as_ref(),
+        )
+        .unwrap();
+        let file_pruner = FilePruner::new(&filters, &table_schema, &partition_schema).unwrap();
+        assert!(!file_pruner.is_empty());
+
+        let file_slices = hudi_table
+            .file_system_view
+            .get_file_slices(
+                &partition_pruner,
+                &file_pruner,
+                &table_schema,
+                &timeline_view,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(!file_slices.is_empty());
+    }
+
+    #[tokio::test]
     async fn fs_view_get_latest_file_slices_with_partition_filters() {
         let base_url = SampleTable::V6ComplexkeygenHivestyle.url_to_cow();
         let hudi_table = Table::new(base_url.path()).await.unwrap();
@@ -654,6 +922,186 @@ mod tests {
             let metadata = fsl.base_file.file_metadata.as_ref().unwrap();
             assert!(metadata.size > 0);
         }
+    }
+
+    #[tokio::test]
+    async fn fs_view_load_file_groups_from_metadata_records_respects_partition_pruner() {
+        let base_url = SampleTable::V6SimplekeygenNonhivestyle.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+        let latest_timestamp = hudi_table.timeline.get_latest_commit_timestamp().unwrap();
+        let timeline_view = hudi_table
+            .timeline
+            .create_view_as_of(&latest_timestamp)
+            .await
+            .unwrap();
+        let partition_schema = hudi_table.get_partition_schema().await.unwrap();
+        let table_schema = hudi_table.get_schema().await.unwrap();
+        let partition_filters = vec![Filter::try_from(("byteField", "=", "10")).unwrap()];
+        let partition_pruner = PartitionPruner::new(
+            &partition_filters,
+            &partition_schema,
+            hudi_table.hudi_configs.as_ref(),
+        )
+        .unwrap();
+        let file_pruner = FilePruner::empty();
+
+        let file_name_10 =
+            "97de74b1-2a8e-4bb7-874c-0a74e1f42a77-0_0-119-166_20240418172804498.parquet";
+        let file_name_20 =
+            "76e0556b-390d-4249-b7ad-9059e2bc2cbd-0_0-98-141_20240418172802262.parquet";
+        let records = HashMap::from([
+            create_files_partition_record("10", file_name_10, 1024),
+            create_files_partition_record("20", file_name_20, 1024),
+        ]);
+
+        hudi_table
+            .file_system_view
+            .load_file_groups(
+                &partition_pruner,
+                &file_pruner,
+                &table_schema,
+                &timeline_view,
+                Some(&records),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            hudi_table
+                .file_system_view
+                .partition_to_file_groups
+                .contains_key("10")
+        );
+        assert!(
+            !hudi_table
+                .file_system_view
+                .partition_to_file_groups
+                .contains_key("20")
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_view_apply_stats_pruning_keeps_file_when_footer_stats_fail_to_load() {
+        let (hudi_table, table_schema, file_pruner, as_of) =
+            build_file_pruning_context(("intField", ">=", "0")).await;
+
+        let missing_file_group = FileGroup::new_with_base_file_name(
+            "a079bdb3-731c-4894-b855-abfcd6921007-0_0-999-999_20240418173551906.parquet",
+            "",
+        )
+        .unwrap();
+        let retained = hudi_table
+            .file_system_view
+            .apply_stats_pruning_from_footers(
+                vec![missing_file_group],
+                &file_pruner,
+                &table_schema,
+                &as_of,
+            )
+            .await;
+
+        assert_eq!(retained.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fs_view_apply_stats_pruning_drops_files_that_do_not_match_filters() {
+        let (hudi_table, table_schema, file_pruner, as_of) =
+            build_file_pruning_context(("intField", ">", "1000000")).await;
+
+        let file_group = FileGroup::new_with_base_file_name(
+            "a079bdb3-731c-4894-b855-abfcd6921007-0_0-203-274_20240418173551906.parquet",
+            "",
+        )
+        .unwrap();
+        let retained = hudi_table
+            .file_system_view
+            .apply_stats_pruning_from_footers(vec![file_group], &file_pruner, &table_schema, &as_of)
+            .await;
+
+        assert!(retained.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fs_view_apply_stats_pruning_keeps_file_group_without_slice_as_of_timestamp() {
+        let (hudi_table, table_schema, file_pruner, _) =
+            build_file_pruning_context(("intField", ">", "1000000")).await;
+
+        let file_group = FileGroup::new_with_base_file_name(
+            "a079bdb3-731c-4894-b855-abfcd6921007-0_0-203-274_20240418173551906.parquet",
+            "",
+        )
+        .unwrap();
+        let retained = hudi_table
+            .file_system_view
+            .apply_stats_pruning_from_footers(
+                vec![file_group],
+                &file_pruner,
+                &table_schema,
+                "19700101000000",
+            )
+            .await;
+
+        assert_eq!(retained.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fs_view_get_file_slices_with_metadata_table() {
+        let table_path = QuickstartTripsTable::V8Trips8I3U1D.path_to_mor_avro();
+        let hudi_table = Table::new(&table_path).await.unwrap();
+        let latest_timestamp = hudi_table.timeline.get_latest_commit_timestamp().unwrap();
+        let timeline_view = hudi_table
+            .timeline
+            .create_view_as_of(&latest_timestamp)
+            .await
+            .unwrap();
+        let partition_schema = hudi_table.get_partition_schema().await.unwrap();
+        let partition_pruner =
+            PartitionPruner::new(&[], &partition_schema, hudi_table.hudi_configs.as_ref()).unwrap();
+        let file_pruner = FilePruner::empty();
+        let table_schema = hudi_table.get_schema().await.unwrap();
+        let metadata_table = hudi_table.get_or_init_metadata_table().await.unwrap();
+
+        let file_slices = hudi_table
+            .file_system_view
+            .get_file_slices(
+                &partition_pruner,
+                &file_pruner,
+                &table_schema,
+                &timeline_view,
+                Some(metadata_table),
+            )
+            .await
+            .unwrap();
+
+        assert!(!file_slices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fs_view_get_file_slices_by_storage_listing() {
+        let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+        let latest_timestamp = hudi_table.timeline.get_latest_commit_timestamp().unwrap();
+        let timeline_view = hudi_table
+            .timeline
+            .create_view_as_of(&latest_timestamp)
+            .await
+            .unwrap();
+        let partition_pruner = PartitionPruner::empty();
+        let file_pruner = FilePruner::empty();
+        let table_schema = hudi_table.get_schema().await.unwrap();
+
+        let file_slices = hudi_table
+            .file_system_view
+            .get_file_slices_by_storage_listing(
+                &partition_pruner,
+                &file_pruner,
+                &table_schema,
+                &timeline_view,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(file_slices.len(), 1);
     }
 
     mod test_find_sample_base_file_path {
