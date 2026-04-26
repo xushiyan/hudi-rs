@@ -19,7 +19,7 @@
 use crate::Result;
 use crate::config::HudiConfigs;
 use crate::config::read::HudiReadConfig;
-use crate::config::table::HudiTableConfig;
+use crate::config::table::{BaseFileFormatValue, HudiTableConfig};
 use crate::config::util::split_hudi_options_from_others;
 use crate::error::CoreError;
 use crate::error::CoreError::ReadFileSliceError;
@@ -104,6 +104,19 @@ impl FileGroupReader {
         })
     }
 
+    fn ensure_parquet_base_file_format(&self, operation: &str) -> Result<()> {
+        let base_file_format: String = self
+            .hudi_configs
+            .get_or_default(HudiTableConfig::BaseFileFormat)
+            .into();
+        if !base_file_format.eq_ignore_ascii_case(BaseFileFormatValue::Parquet.as_ref()) {
+            return Err(ReadFileSliceError(format!(
+                "Unsupported base file format '{base_file_format}' for {operation}; only parquet base files are supported"
+            )));
+        }
+        Ok(())
+    }
+
     /// Reads the data from the base file at the given relative path.
     ///
     /// # Arguments
@@ -115,6 +128,8 @@ impl FileGroupReader {
         &self,
         relative_path: &str,
     ) -> Result<RecordBatch> {
+        self.ensure_parquet_base_file_format("base file read")?;
+
         let records: RecordBatch = self
             .storage
             .get_parquet_file_data(relative_path)
@@ -341,18 +356,7 @@ impl FileGroupReader {
         relative_path: &str,
         options: &ReadOptions,
     ) -> Result<BoxStream<'static, Result<RecordBatch>>> {
-        use crate::config::table::BaseFileFormatValue;
-
-        // Validate base file format is parquet
-        let base_file_format: String = self
-            .hudi_configs
-            .get_or_default(HudiTableConfig::BaseFileFormat)
-            .into();
-        if !base_file_format.eq_ignore_ascii_case(BaseFileFormatValue::Parquet.as_ref()) {
-            return Err(ReadFileSliceError(format!(
-                "Streaming read only supports parquet format, got: {base_file_format}"
-            )));
-        }
+        self.ensure_parquet_base_file_format("streaming read")?;
 
         let default_batch_size: usize = self
             .hudi_configs
@@ -868,7 +872,10 @@ mod tests {
 
         assert!(result.is_err(), "Should return error for non-existent file");
 
-        let error_msg = result.unwrap_err().to_string();
+        let error_msg = result
+            .err()
+            .expect("Expected file not found error")
+            .to_string();
         assert!(
             error_msg.contains("not found") || error_msg.contains("Failed to read path"),
             "Should contain appropriate error message, got: {error_msg}"
@@ -930,6 +937,48 @@ mod tests {
         )
     }
 
+    /// Helper to create a FileGroupReader with an explicit base file format.
+    fn create_test_reader_with_base_file_format(
+        base_uri: &str,
+        base_file_format: &str,
+    ) -> Result<FileGroupReader> {
+        let hudi_configs = Arc::new(HudiConfigs::new([
+            (HudiTableConfig::BasePath, base_uri),
+            (HudiTableConfig::BaseFileFormat, base_file_format),
+        ]));
+        FileGroupReader::new_with_configs_and_overwriting_options(hudi_configs, empty_options())
+    }
+
+    #[tokio::test]
+    async fn test_read_file_slice_by_base_file_path_fails_fast_on_non_parquet_format() -> Result<()>
+    {
+        let base_uri = get_base_uri_with_valid_props_minimum();
+        let reader = create_test_reader_with_base_file_format(&base_uri, "hfile")?;
+
+        let result = reader
+            .read_file_slice_by_base_file_path(TEST_SAMPLE_BASE_FILE)
+            .await;
+        assert!(
+            result.is_err(),
+            "Expected fail-fast for non-parquet base format"
+        );
+
+        let error_msg = result
+            .err()
+            .expect("Expected fail-fast error for non-parquet format")
+            .to_string();
+        assert!(
+            error_msg.contains("Unsupported base file format 'hfile'"),
+            "Expected explicit base format error, got: {error_msg}"
+        );
+        assert!(
+            error_msg.contains("base file read"),
+            "Expected operation context in error, got: {error_msg}"
+        );
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_read_file_slice_stream_base_file_only() -> Result<()> {
         use futures::StreamExt;
@@ -965,6 +1014,36 @@ mod tests {
                 );
             }
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_file_slice_stream_fails_fast_on_non_parquet_format() -> Result<()> {
+        let base_uri = get_base_uri_with_valid_props_minimum();
+        let reader = create_test_reader_with_base_file_format(&base_uri, "hfile")?;
+        let base_file = BaseFile::from_str(TEST_SAMPLE_BASE_FILE)?;
+        let file_slice = FileSlice::new(base_file, String::new());
+
+        let options = ReadOptions::default();
+        let result = reader.read_file_slice_stream(&file_slice, &options).await;
+        assert!(
+            result.is_err(),
+            "Expected fail-fast for non-parquet base format"
+        );
+
+        let error_msg = result
+            .err()
+            .expect("Expected fail-fast error for non-parquet format")
+            .to_string();
+        assert!(
+            error_msg.contains("Unsupported base file format 'hfile'"),
+            "Expected explicit base format error, got: {error_msg}"
+        );
+        assert!(
+            error_msg.contains("streaming read"),
+            "Expected operation context in error, got: {error_msg}"
+        );
 
         Ok(())
     }

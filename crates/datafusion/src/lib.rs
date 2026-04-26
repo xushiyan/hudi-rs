@@ -48,6 +48,7 @@ use log::warn;
 
 use crate::util::expr::exprs_to_filters;
 use hudi_core::config::read::HudiReadConfig::{InputPartitions, UseReadOptimizedMode};
+use hudi_core::config::table::{BaseFileFormatValue, HudiTableConfig};
 use hudi_core::config::util::empty_options;
 use hudi_core::storage::util::{get_scheme_authority, join_url_segments};
 use hudi_core::table::Table as HudiTable;
@@ -126,6 +127,16 @@ impl HudiDataSource {
         let table = HudiTable::new_with_options(base_uri, options)
             .await
             .map_err(|e| Execution(format!("Failed to create Hudi table: {e}")))?;
+
+        let base_file_format: String = table
+            .hudi_configs
+            .get_or_default(HudiTableConfig::BaseFileFormat)
+            .into();
+        if !base_file_format.eq_ignore_ascii_case(BaseFileFormatValue::Parquet.as_ref()) {
+            return Err(Execution(format!(
+                "Unsupported base file format '{base_file_format}' for HudiDataSource; only parquet is supported"
+            )));
+        }
 
         // Cache schema with meta fields at construction for synchronous access
         let schema = table
@@ -531,6 +542,8 @@ impl TableProviderFactory for HudiTableFactory {
 mod tests {
     use super::*;
     use datafusion_common::{Column, ScalarValue};
+    use hudi_core::config::internal::HudiInternalConfig;
+    use hudi_core::config::table::{BaseFileFormatValue, HudiTableConfig};
     use std::fs::canonicalize;
     use std::path::Path;
     use url::Url;
@@ -547,6 +560,35 @@ mod tests {
                 .unwrap();
         let hudi = HudiDataSource::new(base_url.as_str()).await.unwrap();
         assert_eq!(hudi.get_input_partitions(), 0)
+    }
+
+    #[tokio::test]
+    async fn test_new_with_options_fails_fast_on_non_parquet_base_file_format() {
+        let result = HudiDataSource::new_with_options(
+            V6Nonpartitioned.path_to_cow().as_str(),
+            [
+                (
+                    HudiTableConfig::BaseFileFormat.as_ref(),
+                    BaseFileFormatValue::HFile.as_ref(),
+                ),
+                (HudiInternalConfig::SkipConfigValidation.as_ref(), "true"),
+            ],
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "Expected constructor fail-fast for unsupported base file format"
+        );
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("Unsupported base file format 'hfile'"),
+            "Expected explicit base format error, got: {error_msg}"
+        );
+        assert!(
+            error_msg.contains("only parquet is supported"),
+            "Expected parquet-only guidance, got: {error_msg}"
+        );
     }
 
     #[tokio::test]

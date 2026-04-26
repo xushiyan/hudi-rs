@@ -873,11 +873,8 @@ impl Table {
             .ok()?;
 
         // Only count base files (exclude log files which start with '.').
-        let base_file_format: String = self
-            .hudi_configs
-            .get_or_default(HudiTableConfig::BaseFileFormat)
-            .into();
-        let base_file_suffix = format!(".{base_file_format}");
+        let base_file_format = self.file_system_view.base_file_format();
+        let base_file_suffix = format!(".{}", base_file_format.as_ref());
         let total_on_disk_size: u64 = records
             .values()
             .filter(|r| !r.is_all_partitions())
@@ -889,14 +886,14 @@ impl Table {
             FileSystemView::find_sample_base_file_path_from_records(&records, &base_file_format);
 
         if total_on_disk_size == 0 {
-            return Some((0, 0));
+            return None;
         }
 
         // Step 2: Use the cached estimator (or init it now).
         // Return None if no sample file is found or estimator fails to initialize.
         match self
             .file_system_view
-            .get_or_init_estimator(sample_file_path.as_deref())
+            .get_or_init_estimator(&base_file_format, sample_file_path.as_deref())
             .await
         {
             Some(estimator) => {
