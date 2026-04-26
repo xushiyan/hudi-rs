@@ -114,13 +114,13 @@ use crate::schema::resolver::{
 use crate::table::builder::TableBuilder;
 use crate::table::file_pruner::FilePruner;
 use crate::table::fs_view::FileSystemView;
-use crate::table::partition::PartitionPruner;
+use crate::table::partition::{PartitionPruner, project_partition_schema};
 use crate::timeline::util::format_timestamp;
 use crate::timeline::{EARLIEST_START_TIMESTAMP, Timeline};
 use crate::util::collection::split_into_chunks;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::{Field, Schema};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use url::Url;
 
@@ -283,20 +283,11 @@ impl Table {
             )]));
         }
 
-        let partition_fields: HashSet<String> = {
-            let fields: Vec<String> = self.hudi_configs.get_or_default(PartitionFields).into();
-            fields.into_iter().collect()
-        };
+        let partition_field_names: Vec<String> =
+            self.hudi_configs.get_or_default(PartitionFields).into();
 
         let schema = self.get_schema().await?;
-        let partition_fields: Vec<Arc<Field>> = schema
-            .fields()
-            .iter()
-            .filter(|field| partition_fields.contains(field.name()))
-            .cloned()
-            .collect();
-
-        Ok(Schema::new(partition_fields))
+        project_partition_schema(&schema, &partition_field_names)
     }
 
     /// Get the [Timeline] of the table.
@@ -1014,6 +1005,17 @@ mod tests {
         assert!(schema.is_ok());
         let schema = schema.unwrap();
         assert_arrow_field_names_eq!(schema, [MetaField::PartitionPath.as_ref()]);
+    }
+
+    #[tokio::test]
+    async fn hudi_table_get_partition_schema_uses_config_order_not_table_schema_order() {
+        // V6ComplexkeygenHivestyle declares PARTITIONED BY (byteField, shortField).
+        // The returned partition schema must follow the partition.fields config order,
+        // which also matches the on-disk partition path order: byteField=.../shortField=...
+        let base_url = SampleTable::V6ComplexkeygenHivestyle.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+        let schema = hudi_table.get_partition_schema().await.unwrap();
+        assert_arrow_field_names_eq!(schema, ["byteField", "shortField"]);
     }
 
     #[tokio::test]
