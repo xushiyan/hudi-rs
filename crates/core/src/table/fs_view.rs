@@ -95,6 +95,8 @@ impl FileSystemView {
     /// * `table_schema` - Table schema for statistics extraction
     /// * `timeline_view` - The timeline view providing query timestamp and completion time lookups
     /// * `files_partition_records` - Optional pre-fetched metadata table records
+    /// * `estimator` - Optional estimator used to populate `byte_size` and
+    ///   `num_records` on base-file metadata for both MDT and storage-listing paths
     async fn load_file_groups(
         &self,
         partition_pruner: &PartitionPruner,
@@ -121,7 +123,7 @@ impl FileSystemView {
                 partition_pruner.to_owned(),
             );
             lister
-                .list_file_groups_for_relevant_partitions(timeline_view)
+                .list_file_groups_for_relevant_partitions(timeline_view, estimator)
                 .await?
         };
 
@@ -487,6 +489,48 @@ mod tests {
         for fsl in file_slices.iter() {
             let metadata = fsl.base_file.file_metadata.as_ref().unwrap();
             assert!(metadata.size > 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn fs_view_get_latest_file_slices_with_estimator_populates_estimated_metadata() {
+        let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+        let latest_timestamp = hudi_table.timeline.get_latest_commit_timestamp().unwrap();
+        let fs_view = &hudi_table.file_system_view;
+
+        let timeline_view = hudi_table
+            .timeline
+            .create_view_as_of(&latest_timestamp)
+            .await
+            .unwrap();
+        let partition_pruner = PartitionPruner::empty();
+        let file_pruner = FilePruner::empty();
+        let table_schema = hudi_table.get_schema().await.unwrap();
+        let estimator = hudi_table.get_or_init_estimator(&latest_timestamp).await;
+        assert!(
+            estimator.is_some(),
+            "Expected estimator for parquet sample table"
+        );
+
+        let file_slices = fs_view
+            .get_file_slices(
+                &partition_pruner,
+                &file_pruner,
+                &table_schema,
+                &timeline_view,
+                None,
+                estimator,
+            )
+            .await
+            .unwrap();
+
+        assert!(!file_slices.is_empty());
+        for fsl in file_slices.iter() {
+            let metadata = fsl.base_file.file_metadata.as_ref().unwrap();
+            assert!(metadata.size > 0);
+            assert!(metadata.byte_size > 0);
+            assert!(metadata.num_records > 0);
         }
     }
 

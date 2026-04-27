@@ -211,7 +211,14 @@ impl Table {
                 FileStatsEstimator::from_parquet_footer(&self.file_system_view.storage, &path).await
             })
             .await
-            .ok()
+            .map(Some)
+            .unwrap_or_else(|e| {
+                log::warn!(
+                    "Failed to initialize file stats estimator from sample base file '{path}' \
+                     (as-of timestamp: '{sample_at_timestamp}'): {e}"
+                );
+                None
+            })
     }
 
     /// Sample one base file path active at or before the given timestamp.
@@ -539,6 +546,8 @@ impl Table {
             None
         };
 
+        // Estimator-backed metadata enrichment is used by both MDT-backed loading
+        // and fallback storage listing.
         let estimator = self.get_or_init_estimator(timestamp).await;
 
         self.file_system_view

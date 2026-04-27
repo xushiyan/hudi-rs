@@ -222,37 +222,32 @@ impl HoodieCommitMetadata {
 
     /// Iterate over relative base-file paths recorded in the commit's write stats.
     ///
-    /// For MOR write stats, returns `<partition>/<baseFile>`.
-    /// For COW write stats, returns the recorded `path` as-is.
-    /// Skips entries whose recorded name does not look like a base file:
-    /// - empty
-    /// - ends with `/` (a directory)
-    /// - file name starts with `.` (Hudi log file convention)
-    /// - has no extension (no `.`)
+    /// Uses dedicated fields from `HoodieWriteStat`:
+    /// - MOR writes use `baseFile` (joined with partition path)
+    /// - COW writes use `path`
+    ///
+    /// Empty values are ignored. For write stats that only carry log-file entries
+    /// (`logFiles` present but no `baseFile`), no base-file path is emitted.
     pub fn iter_base_file_paths(&self) -> impl Iterator<Item = String> + '_ {
-        fn looks_like_base_file(name: &str) -> bool {
-            if name.is_empty() || name.ends_with('/') {
-                return false;
-            }
-            let file_name = name.rsplit('/').next().unwrap_or(name);
-            !file_name.starts_with('.') && file_name.contains('.')
-        }
         self.iter_write_stats().filter_map(|(partition, stat)| {
-            if let Some(base_file) = stat
-                .base_file
-                .as_deref()
-                .filter(|s| looks_like_base_file(s))
-            {
+            if let Some(base_file) = stat.base_file.as_deref().filter(|s| !s.is_empty()) {
                 if partition.is_empty() {
                     Some(base_file.to_string())
                 } else {
                     Some(format!("{partition}/{base_file}"))
                 }
             } else {
-                stat.path
-                    .as_deref()
-                    .filter(|s| looks_like_base_file(s))
-                    .map(|s| s.to_string())
+                // MOR log-only write stats may have `path` set to a log-file path.
+                // Those entries are identifiable by `logFiles` being present while
+                // `baseFile` is absent, and should not contribute base-file samples.
+                if stat.log_files.is_some() {
+                    None
+                } else {
+                    stat.path
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                }
             }
         })
     }
@@ -725,17 +720,18 @@ mod tests {
 
     #[test]
     fn test_iter_base_file_paths_filters_log_files_and_invalid_paths() {
-        // baseFile holding a log file name (Hudi log files start with `.`),
-        // a partition-only path, and an empty string must all be filtered out.
+        // MOR log-only write stats (`logFiles` present, no `baseFile`) should
+        // not emit a base-file path.
         let json = json!({
             "partitionToWriteStats": {
                 "p1": [{
                     "fileId": "fid-0",
-                    "baseFile": ".fid-0_20240418173200000.log.1_0-1-2"
+                    "path": "p1/.fid-0_20240418173200000.log.1_0-1-2",
+                    "logFiles": [".fid-0_20240418173200000.log.1_0-1-2"]
                 }],
                 "p2": [{
                     "fileId": "fid-1",
-                    "path": "p2/"
+                    "path": "p2/fid-1_0-7-24_20240418173200000.parquet"
                 }],
                 "p3": [{
                     "fileId": "fid-2",
@@ -748,10 +744,56 @@ mod tests {
             }
         });
         let metadata: HoodieCommitMetadata = serde_json::from_value(json).unwrap();
+        let mut paths: Vec<String> = metadata.iter_base_file_paths().collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "p2/fid-1_0-7-24_20240418173200000.parquet".to_string(),
+                "p4/fid-3_0-7-24_20240418173200000.parquet".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_iter_base_file_paths_from_sample_cow_commit() {
+        let file_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/timeline/commits_load_schema_from_base_file_cow/.hoodie/20250628002223107.commit"
+        );
+        let bytes = std::fs::read(file_path).expect("Failed to read test fixture");
+        let metadata = HoodieCommitMetadata::from_json_bytes(&bytes)
+            .expect("Failed to parse sample COW commit metadata");
+
+        let mut paths: Vec<String> = metadata.iter_base_file_paths().collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "city=chennai/03ffd613-fb74-456e-b6bb-115355d9b0ed-0_2-13-37_20250628002223107.parquet".to_string(),
+                "city=san_francisco/b271b5f8-29df-463d-ba4d-feedbe6e09ed-0_0-13-35_20250628002223107.parquet".to_string(),
+                "city=sao_paulo/a3c5da68-55a5-4804-ab8b-57e75252c69f-0_1-13-36_20250628002223107.parquet".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_iter_base_file_paths_from_sample_mor_deltacommit() {
+        let file_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/timeline/commits_load_schema_from_base_file_mor/.hoodie/20250331030645735.deltacommit"
+        );
+        let bytes = std::fs::read(file_path).expect("Failed to read test fixture");
+        let metadata = HoodieCommitMetadata::from_json_bytes(&bytes)
+            .expect("Failed to parse sample MOR deltacommit metadata");
+
         let paths: Vec<String> = metadata.iter_base_file_paths().collect();
         assert_eq!(
             paths,
-            vec!["p4/fid-3_0-7-24_20240418173200000.parquet".to_string()]
+            vec![
+                "city=san_francisco/d0304c53-6fd2-4b7a-a9d6-5ff632f79224-0_0-13-60_20250331030642808.parquet"
+                    .to_string()
+            ]
         );
     }
 }
