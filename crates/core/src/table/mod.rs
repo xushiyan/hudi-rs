@@ -107,6 +107,7 @@ use crate::file_group::file_slice::FileSlice;
 use crate::file_group::reader::FileGroupReader;
 use crate::keygen::is_timestamp_based_keygen;
 use crate::metadata::METADATA_TABLE_PARTITION_FIELD;
+use crate::metadata::commit::HoodieCommitMetadata;
 use crate::metadata::meta_field::MetaField;
 use crate::schema::resolver::{
     resolve_avro_schema, resolve_avro_schema_with_meta_fields, resolve_data_schema, resolve_schema,
@@ -162,6 +163,23 @@ impl Table {
                 self.new_metadata_table().await
             })
             .await
+    }
+
+    /// Sample one base file path active at or before the given timestamp by
+    /// reading the latest completed commit ≤ timestamp and returning the first
+    /// recorded base-file path from its write stats.
+    ///
+    /// Format-agnostic by design: callers that require a specific format must
+    /// validate before invoking. Returns `None` if there is no such commit or
+    /// no recorded base-file path.
+    pub(crate) async fn sample_base_file_path_at_or_before(
+        &self,
+        timestamp: &str,
+    ) -> Option<String> {
+        let commit = self.timeline.get_latest_commit_at_or_before(timestamp).ok()??;
+        let metadata = self.timeline.get_instant_metadata(&commit).await.ok()?;
+        let parsed = HoodieCommitMetadata::from_json_map(&metadata).ok()?;
+        parsed.iter_base_file_paths().next()
     }
 
     /// Create hudi table by base_uri

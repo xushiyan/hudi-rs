@@ -215,7 +215,10 @@ impl Timeline {
         Ok(clustering_instants)
     }
 
-    async fn get_instant_metadata(&self, instant: &Instant) -> Result<Map<String, Value>> {
+    pub(crate) async fn get_instant_metadata(
+        &self,
+        instant: &Instant,
+    ) -> Result<Map<String, Value>> {
         self.active_loader.load_instant_metadata(instant).await
     }
 
@@ -278,6 +281,23 @@ impl Timeline {
     pub async fn get_latest_schema(&self) -> Result<Schema> {
         let commit_metadata = self.get_latest_commit_metadata().await?;
         resolve_data_schema_from_commit_metadata(&commit_metadata, self.storage.clone()).await
+    }
+
+    /// Get the latest completed commit instant whose request timestamp is ≤ `timestamp`.
+    ///
+    /// Returns `None` if no such commit exists.
+    pub(crate) fn get_latest_commit_at_or_before(
+        &self,
+        timestamp: &str,
+    ) -> Result<Option<Instant>> {
+        let selector = TimelineSelector::completed_actions_in_range(
+            DEFAULT_LOADING_ACTIONS,
+            self.hudi_configs.clone(),
+            None,
+            Some(timestamp),
+        )?;
+        let mut commits = selector.select(self)?;
+        Ok(commits.pop())
     }
 
     pub(crate) async fn get_replaced_file_groups_as_of(
