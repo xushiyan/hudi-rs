@@ -199,7 +199,9 @@ impl Table {
                 ) {
                     return None;
                 }
-                let path = self.sample_base_file_path_at_or_before(sample_at_timestamp).await?;
+                let path = self
+                    .sample_base_file_path_at_or_before(sample_at_timestamp)
+                    .await?;
                 FileStatsEstimator::from_parquet_footer(&self.file_system_view.storage, &path)
                     .await
                     .ok()
