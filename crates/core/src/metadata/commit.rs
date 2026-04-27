@@ -220,6 +220,25 @@ impl HoodieCommitMetadata {
             })
     }
 
+    /// Iterate over relative base-file paths recorded in the commit's write stats.
+    ///
+    /// For MOR write stats, returns `<partition>/<baseFile>`.
+    /// For COW write stats, returns the recorded `path` as-is.
+    /// Skips entries that have neither a base file nor a path.
+    pub fn iter_base_file_paths(&self) -> impl Iterator<Item = String> + '_ {
+        self.iter_write_stats().filter_map(|(partition, stat)| {
+            if let Some(base_file) = &stat.base_file {
+                if partition.is_empty() {
+                    Some(base_file.clone())
+                } else {
+                    Some(format!("{partition}/{base_file}"))
+                }
+            } else {
+                stat.path.clone()
+            }
+        })
+    }
+
     /// Iterate over all replace file IDs across all partitions
     pub fn iter_replace_file_ids(&self) -> impl Iterator<Item = (&String, &String)> {
         self.partition_to_replace_file_ids
@@ -658,5 +677,31 @@ mod tests {
         let metadata: HoodieCommitMetadata = serde_json::from_value(json).unwrap();
         let count = metadata.iter_replace_file_ids().count();
         assert_eq!(count, 3); // 1 from p1, 2 from p2
+    }
+
+    #[test]
+    fn test_iter_base_file_paths_mor_and_cow() {
+        let json = json!({
+            "partitionToWriteStats": {
+                "p1": [{
+                    "fileId": "fid-0",
+                    "baseFile": "fid-0_0-7-24_20240418173200000.parquet"
+                }],
+                "": [{
+                    "fileId": "fid-1",
+                    "path": "fid-1_0-7-24_20240418173200001.parquet"
+                }]
+            }
+        });
+        let metadata: HoodieCommitMetadata = serde_json::from_value(json).unwrap();
+        let mut paths: Vec<String> = metadata.iter_base_file_paths().collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "fid-1_0-7-24_20240418173200001.parquet".to_string(),
+                "p1/fid-0_0-7-24_20240418173200000.parquet".to_string(),
+            ]
+        );
     }
 }
