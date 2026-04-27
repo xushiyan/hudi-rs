@@ -33,6 +33,7 @@ use crate::file_group::builder::replaced_file_groups_from_replace_commit;
 use crate::schema::resolver::{
     resolve_avro_schema_from_commit_metadata, resolve_data_schema_from_commit_metadata,
 };
+use crate::statistics::estimator::FileStatsEstimator;
 use crate::storage::Storage;
 use crate::timeline::builder::TimelineBuilder;
 use crate::timeline::instant::Action;
@@ -333,6 +334,7 @@ impl Timeline {
         &self,
         start_timestamp: Option<&str>,
         end_timestamp: Option<&str>,
+        estimator: Option<&FileStatsEstimator>,
     ) -> Result<HashSet<FileGroup>> {
         use crate::file_group::builder::{
             FileGroupMerger, file_groups_from_commit_metadata,
@@ -368,6 +370,7 @@ impl Timeline {
             file_groups.merge(file_groups_from_commit_metadata(
                 &commit_metadata,
                 &completion_time_view,
+                estimator,
             )?)?;
 
             if commit.is_replacecommit() {

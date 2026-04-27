@@ -619,11 +619,17 @@ impl Table {
         start_timestamp: &str,
         end_timestamp: &str,
     ) -> Result<Vec<FileSlice>> {
-        let mut file_slices: Vec<FileSlice> = Vec::new();
+        // Seed the cached estimator from a sample base file at or before
+        // end_timestamp so the file group builder can populate FileMetadata
+        // (size, byte_size, num_records) on each base file.
+        let estimator = self.get_or_init_estimator(end_timestamp).await;
+
         let file_groups = self
             .timeline
-            .get_file_groups_between(Some(start_timestamp), Some(end_timestamp))
+            .get_file_groups_between(Some(start_timestamp), Some(end_timestamp), estimator)
             .await?;
+
+        let mut file_slices: Vec<FileSlice> = Vec::new();
         for file_group in file_groups {
             if let Some(file_slice) = file_group.get_file_slice_as_of(end_timestamp) {
                 file_slices.push(file_slice.clone());
