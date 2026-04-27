@@ -21,7 +21,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_schema::Schema;
-use tokio::sync::OnceCell;
 
 use crate::Result;
 use crate::config::HudiConfigs;
@@ -43,12 +42,10 @@ use dashmap::DashMap;
 /// A view of the Hudi table's data files (files stored outside the `.hoodie/` directory) in the file system. It provides APIs to load and
 /// access the file groups and file slices.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct FileSystemView {
     pub(crate) hudi_configs: Arc<HudiConfigs>,
     pub(crate) storage: Arc<Storage>,
     partition_to_file_groups: Arc<DashMap<String, Vec<FileGroup>>>,
-    file_stats_estimator: Arc<OnceCell<FileStatsEstimator>>,
 }
 
 impl FileSystemView {
@@ -56,10 +53,6 @@ impl FileSystemView {
         let s: String = self.hudi_configs.get_or_default(BaseFileFormat).into();
         s.parse::<BaseFileFormatValue>()
             .unwrap_or(BaseFileFormatValue::Parquet)
-    }
-
-    fn supports_footer_stats_estimation(format: &BaseFileFormatValue) -> bool {
-        matches!(format, BaseFileFormatValue::Parquet)
     }
 
     /// Case-insensitive ASCII suffix check that avoids allocating a lowercased copy of `s`.
@@ -80,71 +73,7 @@ impl FileSystemView {
             hudi_configs,
             storage,
             partition_to_file_groups,
-            file_stats_estimator: Arc::new(OnceCell::new()),
         })
-    }
-
-    /// Get or initialize the file stats estimator.
-    pub(crate) async fn get_or_init_estimator(
-        &self,
-        base_file_format: &BaseFileFormatValue,
-        sample_file_path: Option<&str>,
-    ) -> Option<&FileStatsEstimator> {
-        if !Self::supports_footer_stats_estimation(base_file_format) {
-            return None;
-        }
-
-        if let Some(path) = sample_file_path {
-            match self
-                .file_stats_estimator
-                .get_or_try_init(|| FileStatsEstimator::from_parquet_footer(&self.storage, path))
-                .await
-            {
-                Ok(estimator) => Some(estimator),
-                Err(e) => {
-                    log::warn!("Failed to initialize file stats estimator: {e}");
-                    None
-                }
-            }
-        } else {
-            self.file_stats_estimator.get()
-        }
-    }
-
-    /// Find a sample base-file path from metadata table records.
-    ///
-    /// Selects the lexicographically-smallest matching path so the sampled file is
-    /// stable across runs. Stable selection keeps the derived compression ratio and
-    /// the resulting query plan reproducible.
-    pub(crate) fn find_sample_base_file_path_from_records(
-        records: &HashMap<String, FilesPartitionRecord>,
-        base_file_format: &BaseFileFormatValue,
-    ) -> Option<String> {
-        let extension_suffix = format!(".{}", base_file_format.as_ref());
-        let mut best_candidate: Option<String> = None;
-
-        for (key, record) in records {
-            if record.is_all_partitions() {
-                continue;
-            }
-            for file_info in record.files.values() {
-                if file_info.is_deleted
-                    || !Self::ends_with_ignore_ascii_case(&file_info.name, &extension_suffix)
-                {
-                    continue;
-                }
-                let candidate = if key.is_empty() {
-                    file_info.name.clone()
-                } else {
-                    format!("{key}/{}", file_info.name)
-                };
-                if best_candidate.as_ref().is_none_or(|best| candidate < *best) {
-                    best_candidate = Some(candidate);
-                }
-            }
-        }
-
-        best_candidate
     }
 
     /// Load file groups from the appropriate source (storage or metadata table records)
@@ -173,27 +102,17 @@ impl FileSystemView {
         table_schema: &Schema,
         timeline_view: &TimelineView,
         files_partition_records: Option<&HashMap<String, FilesPartitionRecord>>,
+        estimator: Option<&FileStatsEstimator>,
     ) -> Result<()> {
-        let base_file_format = self.base_file_format();
-        let base_file_extension = base_file_format.as_ref();
+        let base_file_extension = self.base_file_format();
+        let base_file_extension = base_file_extension.as_ref();
 
-        // Step 1: Initialize the file stats estimator from MDT records if available.
-        // For Parquet tables, this reads ONE footer to derive compression ratio and
-        // avg row size, allowing the file group builder to populate estimated metadata inline.
-        if let Some(records) = files_partition_records {
-            let sample_path =
-                Self::find_sample_base_file_path_from_records(records, &base_file_format);
-            self.get_or_init_estimator(&base_file_format, sample_path.as_deref())
-                .await;
-        }
-
-        // Step 2: Get file groups from appropriate source
         let file_groups_map = if let Some(records) = files_partition_records {
             file_groups_from_files_partition_records(
                 records,
                 base_file_extension,
                 timeline_view,
-                self.file_stats_estimator.get(),
+                estimator,
             )?
         } else {
             let lister = FileLister::new(
@@ -206,7 +125,7 @@ impl FileSystemView {
                 .await?
         };
 
-        // Step 3: Apply partition pruning (for metadata table path) and stats pruning
+        // Apply partition pruning (for metadata table path) and stats pruning
         for (partition_path, file_groups) in file_groups_map {
             if files_partition_records.is_some()
                 && !partition_pruner.is_empty()
@@ -251,7 +170,10 @@ impl FileSystemView {
         }
 
         let base_file_format = self.base_file_format();
-        if !Self::supports_footer_stats_estimation(&base_file_format) {
+        // Footer-based column-stats pruning only applies to Parquet base files.
+        // (Separate concern from the FileStatsEstimator parquet check, which lives
+        // on Table::get_or_init_estimator.)
+        if !matches!(base_file_format, BaseFileFormatValue::Parquet) {
             return file_groups;
         }
         let base_file_suffix = format!(".{}", base_file_format.as_ref());
@@ -363,6 +285,7 @@ impl FileSystemView {
         table_schema: &Schema,
         timeline_view: &TimelineView,
         metadata_table: Option<&Table>,
+        estimator: Option<&FileStatsEstimator>,
     ) -> Result<Vec<FileSlice>> {
         let files_partition_records = if let Some(mdt) = metadata_table {
             Some(mdt.fetch_files_partition_records(partition_pruner).await?)
@@ -376,6 +299,7 @@ impl FileSystemView {
             table_schema,
             timeline_view,
             files_partition_records.as_ref(),
+            estimator,
         )
         .await?;
 
@@ -399,6 +323,7 @@ impl FileSystemView {
         file_pruner: &FilePruner,
         table_schema: &Schema,
         timeline_view: &TimelineView,
+        estimator: Option<&FileStatsEstimator>,
     ) -> Result<Vec<FileSlice>> {
         // Pass None to force storage listing (avoids recursion for metadata table)
         self.load_file_groups(
@@ -407,6 +332,7 @@ impl FileSystemView {
             table_schema,
             timeline_view,
             None,
+            estimator,
         )
         .await?;
 
@@ -454,6 +380,7 @@ mod tests {
                 &table_schema,
                 &timeline_view,
                 None,
+                None,
             )
             .await
             .unwrap()
@@ -485,10 +412,6 @@ mod tests {
         FileSystemView::new(hudi_configs, Arc::new(HashMap::new()))
             .await
             .unwrap()
-    }
-
-    async fn new_fs_view_with_base_path(base_url: &Url) -> FileSystemView {
-        new_fs_view_with_base_path_and_format(base_url, BaseFileFormatValue::Parquet.as_ref()).await
     }
 
     fn create_files_partition_record(
@@ -525,26 +448,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fs_view_get_or_init_estimator_handles_non_parquet_and_errors() {
-        let temp_dir = tempdir().unwrap();
-        let base_url = Url::from_directory_path(temp_dir.path()).unwrap();
-        let fs_view = new_fs_view_with_base_path(&base_url).await;
-
-        assert!(
-            fs_view
-                .get_or_init_estimator(&BaseFileFormatValue::HFile, Some("any.hfile"))
-                .await
-                .is_none()
-        );
-        assert!(
-            fs_view
-                .get_or_init_estimator(&BaseFileFormatValue::Parquet, Some("missing.parquet"))
-                .await
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
     async fn fs_view_get_latest_file_slices() {
         let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
         let hudi_table = Table::new(base_url.path()).await.unwrap();
@@ -568,6 +471,7 @@ mod tests {
                 &file_pruner,
                 &table_schema,
                 &timeline_view,
+                None,
                 None,
             )
             .await
@@ -683,6 +587,7 @@ mod tests {
                 &table_schema,
                 &timeline_view,
                 Some(&records),
+                None,
             )
             .await
             .unwrap();
@@ -767,6 +672,7 @@ mod tests {
                 &table_schema,
                 &timeline_view,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -808,6 +714,7 @@ mod tests {
                 &file_pruner,
                 &table_schema,
                 &timeline_view,
+                None,
                 None,
             )
             .await
@@ -865,6 +772,7 @@ mod tests {
                 &table_schema,
                 &timeline_view,
                 Some(&records),
+                None,
             )
             .await
             .unwrap();
@@ -972,6 +880,7 @@ mod tests {
                 &table_schema,
                 &timeline_view,
                 Some(metadata_table),
+                None,
             )
             .await
             .unwrap();
@@ -1000,6 +909,7 @@ mod tests {
                 &file_pruner,
                 &table_schema,
                 &timeline_view,
+                None,
             )
             .await
             .unwrap();
@@ -1007,141 +917,4 @@ mod tests {
         assert_eq!(file_slices.len(), 1);
     }
 
-    mod test_find_sample_base_file_path {
-        use super::*;
-        use crate::config::table::BaseFileFormatValue;
-        use crate::metadata::table::records::{
-            FilesPartitionRecord, HoodieMetadataFileInfo, MetadataRecordType,
-        };
-
-        fn create_files_record(
-            key: &str,
-            files: Vec<(&str, i64, bool)>,
-        ) -> (String, FilesPartitionRecord) {
-            let mut files_map = HashMap::new();
-            for (name, size, is_deleted) in files {
-                files_map.insert(
-                    name.to_string(),
-                    HoodieMetadataFileInfo::new(name.to_string(), size, is_deleted),
-                );
-            }
-            (
-                key.to_string(),
-                FilesPartitionRecord {
-                    key: key.to_string(),
-                    record_type: MetadataRecordType::Files,
-                    files: files_map,
-                },
-            )
-        }
-
-        fn create_all_partitions_record(partitions: Vec<&str>) -> (String, FilesPartitionRecord) {
-            let mut files_map = HashMap::new();
-            for p in partitions {
-                files_map.insert(
-                    p.to_string(),
-                    HoodieMetadataFileInfo::new(p.to_string(), 0, false),
-                );
-            }
-            (
-                FilesPartitionRecord::ALL_PARTITIONS_KEY.to_string(),
-                FilesPartitionRecord {
-                    key: FilesPartitionRecord::ALL_PARTITIONS_KEY.to_string(),
-                    record_type: MetadataRecordType::AllPartitions,
-                    files: files_map,
-                },
-            )
-        }
-
-        #[test]
-        fn test_finds_base_file_in_partitioned_and_non_partitioned() {
-            // Partitioned table: key is the partition path
-            let mut records = HashMap::new();
-            let (k, r) = create_files_record(
-                "city=chennai",
-                vec![("abc-0_0-123_20231214.parquet", 1024, false)],
-            );
-            records.insert(k, r);
-            let result = FileSystemView::find_sample_base_file_path_from_records(
-                &records,
-                &BaseFileFormatValue::Parquet,
-            );
-            assert_eq!(
-                result,
-                Some("city=chennai/abc-0_0-123_20231214.parquet".to_string())
-            );
-
-            // Non-partitioned table: key is empty string
-            let mut records = HashMap::new();
-            let (k, r) =
-                create_files_record("", vec![("abc-0_0-123_20231214.parquet", 1024, false)]);
-            records.insert(k, r);
-            let result = FileSystemView::find_sample_base_file_path_from_records(
-                &records,
-                &BaseFileFormatValue::Parquet,
-            );
-            assert_eq!(result, Some("abc-0_0-123_20231214.parquet".to_string()));
-        }
-
-        #[test]
-        fn test_finds_base_file_for_non_parquet_format() {
-            let mut records = HashMap::new();
-            let (k, r) = create_files_record("partition-a", vec![("file-01.hfile", 1024, false)]);
-            records.insert(k, r);
-            let result = FileSystemView::find_sample_base_file_path_from_records(
-                &records,
-                &BaseFileFormatValue::HFile,
-            );
-            assert_eq!(result, Some("partition-a/file-01.hfile".to_string()));
-        }
-
-        #[test]
-        fn test_returns_none_when_no_valid_base_file() {
-            // Empty records
-            let records = HashMap::new();
-            assert!(
-                FileSystemView::find_sample_base_file_path_from_records(
-                    &records,
-                    &BaseFileFormatValue::Parquet
-                )
-                .is_none()
-            );
-
-            // Only __all_partitions__ record
-            let mut records = HashMap::new();
-            let (k, r) = create_all_partitions_record(vec!["partition1"]);
-            records.insert(k, r);
-            assert!(
-                FileSystemView::find_sample_base_file_path_from_records(
-                    &records,
-                    &BaseFileFormatValue::Parquet
-                )
-                .is_none()
-            );
-
-            // Only deleted parquet files
-            let mut records = HashMap::new();
-            let (k, r) = create_files_record("p1", vec![("deleted.parquet", 100, true)]);
-            records.insert(k, r);
-            assert!(
-                FileSystemView::find_sample_base_file_path_from_records(
-                    &records,
-                    &BaseFileFormatValue::Parquet
-                )
-                .is_none()
-            );
-
-            // Only non-parquet files (log files)
-            let mut records = HashMap::new();
-            let (k, r) = create_files_record("p1", vec![(".abc-0_0-123.log.1_0-456", 200, false)]);
-            records.insert(k, r);
-            assert!(
-                FileSystemView::find_sample_base_file_path_from_records(
-                    &records,
-                    &BaseFileFormatValue::Parquet
-                )
-                .is_none()
-            );
-        }
-    }
 }

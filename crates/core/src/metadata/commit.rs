@@ -224,17 +224,35 @@ impl HoodieCommitMetadata {
     ///
     /// For MOR write stats, returns `<partition>/<baseFile>`.
     /// For COW write stats, returns the recorded `path` as-is.
-    /// Skips entries that have neither a base file nor a path.
+    /// Skips entries whose recorded name does not look like a base file:
+    /// - empty
+    /// - ends with `/` (a directory)
+    /// - file name starts with `.` (Hudi log file convention)
+    /// - has no extension (no `.`)
     pub fn iter_base_file_paths(&self) -> impl Iterator<Item = String> + '_ {
+        fn looks_like_base_file(name: &str) -> bool {
+            if name.is_empty() || name.ends_with('/') {
+                return false;
+            }
+            let file_name = name.rsplit('/').next().unwrap_or(name);
+            !file_name.starts_with('.') && file_name.contains('.')
+        }
         self.iter_write_stats().filter_map(|(partition, stat)| {
-            if let Some(base_file) = &stat.base_file {
+            if let Some(base_file) = stat
+                .base_file
+                .as_deref()
+                .filter(|s| looks_like_base_file(s))
+            {
                 if partition.is_empty() {
-                    Some(base_file.clone())
+                    Some(base_file.to_string())
                 } else {
                     Some(format!("{partition}/{base_file}"))
                 }
             } else {
-                stat.path.clone()
+                stat.path
+                    .as_deref()
+                    .filter(|s| looks_like_base_file(s))
+                    .map(|s| s.to_string())
             }
         })
     }
@@ -702,6 +720,38 @@ mod tests {
                 "fid-1_0-7-24_20240418173200001.parquet".to_string(),
                 "p1/fid-0_0-7-24_20240418173200000.parquet".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn test_iter_base_file_paths_filters_log_files_and_invalid_paths() {
+        // baseFile holding a log file name (Hudi log files start with `.`),
+        // a partition-only path, and an empty string must all be filtered out.
+        let json = json!({
+            "partitionToWriteStats": {
+                "p1": [{
+                    "fileId": "fid-0",
+                    "baseFile": ".fid-0_20240418173200000.log.1_0-1-2"
+                }],
+                "p2": [{
+                    "fileId": "fid-1",
+                    "path": "p2/"
+                }],
+                "p3": [{
+                    "fileId": "fid-2",
+                    "baseFile": ""
+                }],
+                "p4": [{
+                    "fileId": "fid-3",
+                    "baseFile": "fid-3_0-7-24_20240418173200000.parquet"
+                }]
+            }
+        });
+        let metadata: HoodieCommitMetadata = serde_json::from_value(json).unwrap();
+        let paths: Vec<String> = metadata.iter_base_file_paths().collect();
+        assert_eq!(
+            paths,
+            vec!["p4/fid-3_0-7-24_20240418173200000.parquet".to_string()]
         );
     }
 }

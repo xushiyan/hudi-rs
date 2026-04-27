@@ -101,7 +101,7 @@ use crate::Result;
 use crate::config::HudiConfigs;
 use crate::config::read::HudiReadConfig;
 use crate::config::table::HudiTableConfig::PartitionFields;
-use crate::config::table::{HudiTableConfig, TableTypeValue};
+use crate::config::table::{BaseFileFormatValue, HudiTableConfig, TableTypeValue};
 use crate::expr::filter::{Filter, from_str_tuples};
 use crate::file_group::file_slice::FileSlice;
 use crate::file_group::reader::FileGroupReader;
@@ -112,6 +112,7 @@ use crate::metadata::meta_field::MetaField;
 use crate::schema::resolver::{
     resolve_avro_schema, resolve_avro_schema_with_meta_fields, resolve_data_schema, resolve_schema,
 };
+use crate::statistics::estimator::FileStatsEstimator;
 use crate::table::builder::TableBuilder;
 use crate::table::file_pruner::FilePruner;
 use crate::table::fs_view::FileSystemView;
@@ -137,6 +138,10 @@ pub struct Table {
     /// Only populated when metadata table is enabled (v8+ with files partition).
     /// Shared across clones via `Arc` so all scan() calls reuse the same instance.
     cached_metadata_table: Arc<OnceCell<Table>>,
+    /// Cached file stats estimator. Materialized on first call to
+    /// [`Table::get_or_init_estimator`]. `None` after init means "not applicable"
+    /// (non-Parquet base format, no sample path available, or footer read failed).
+    cached_estimator: Arc<OnceCell<Option<FileStatsEstimator>>>,
 }
 
 impl Clone for Table {
@@ -147,6 +152,7 @@ impl Clone for Table {
             timeline: self.timeline.clone(),
             file_system_view: self.file_system_view.clone(),
             cached_metadata_table: self.cached_metadata_table.clone(),
+            cached_estimator: self.cached_estimator.clone(),
         }
     }
 }
@@ -165,21 +171,73 @@ impl Table {
             .await
     }
 
-    /// Sample one base file path active at or before the given timestamp by
-    /// reading the latest completed commit ≤ timestamp and returning the first
-    /// recorded base-file path from its write stats.
+    /// Get or initialize the cached `FileStatsEstimator` for this **data table**.
     ///
-    /// Format-agnostic by design: callers that require a specific format must
-    /// validate before invoking. Returns `None` if there is no such commit or
-    /// no recorded base-file path.
+    /// This is the single point where eligibility for footer-based stats
+    /// estimation is validated. Returns `None` (cached as such) when:
+    /// - The base file format is not Parquet (e.g., HFile metadata tables).
+    /// - No sample base-file path can be derived from commit metadata at or
+    ///   before `sample_at_timestamp`.
+    /// - The parquet footer read fails for the sample path.
+    ///
+    /// The first call materializes the cache; subsequent calls reuse the cached
+    /// `Option<FileStatsEstimator>` regardless of the timestamp passed in.
+    ///
+    /// Not intended for use on metadata tables. MDTs use HFile, which already
+    /// short-circuits via the format check below; this is documented for the
+    /// reader, not enforced via a separate flag.
+    pub(crate) async fn get_or_init_estimator(
+        &self,
+        sample_at_timestamp: &str,
+    ) -> Option<&FileStatsEstimator> {
+        self.cached_estimator
+            .get_or_init(|| async {
+                // SINGLE point of parquet validation for the estimator concern.
+                if !matches!(
+                    self.file_system_view.base_file_format(),
+                    BaseFileFormatValue::Parquet
+                ) {
+                    return None;
+                }
+                let path = self.sample_base_file_path_at_or_before(sample_at_timestamp).await?;
+                FileStatsEstimator::from_parquet_footer(&self.file_system_view.storage, &path)
+                    .await
+                    .ok()
+            })
+            .await
+            .as_ref()
+    }
+
+    /// Sample one base file path active at or before the given timestamp.
+    ///
+    /// Walks completed commits ≤ `timestamp` in reverse (latest-first) and
+    /// returns the first recorded base-file path. This handles MOR tables
+    /// whose latest commit may be a delta commit with only log files —
+    /// in that case we fall back to earlier commits that wrote base files.
+    ///
+    /// Format-agnostic by design: callers that require a specific format
+    /// must validate before invoking. Returns `None` if no commit in range
+    /// has a recorded base-file path.
     pub(crate) async fn sample_base_file_path_at_or_before(
         &self,
         timestamp: &str,
     ) -> Option<String> {
-        let commit = self.timeline.get_latest_commit_at_or_before(timestamp).ok()??;
-        let metadata = self.timeline.get_instant_metadata(&commit).await.ok()?;
-        let parsed = HoodieCommitMetadata::from_json_map(&metadata).ok()?;
-        parsed.iter_base_file_paths().next()
+        let commits = self
+            .timeline
+            .get_completed_commits_at_or_before(timestamp)
+            .ok()?;
+        for commit in commits.iter().rev() {
+            let Ok(metadata) = self.timeline.get_instant_metadata(commit).await else {
+                continue;
+            };
+            let Ok(parsed) = HoodieCommitMetadata::from_json_map(&metadata) else {
+                continue;
+            };
+            if let Some(path) = parsed.iter_base_file_paths().next() {
+                return Some(path);
+            }
+        }
+        None
     }
 
     /// Create hudi table by base_uri
@@ -472,6 +530,8 @@ impl Table {
             None
         };
 
+        let estimator = self.get_or_init_estimator(timestamp).await;
+
         self.file_system_view
             .get_file_slices(
                 &partition_pruner,
@@ -479,6 +539,7 @@ impl Table {
                 &table_schema,
                 &timeline_view,
                 metadata_table,
+                estimator,
             )
             .await
     }
@@ -891,19 +952,15 @@ impl Table {
             .filter(|(name, _)| name.ends_with(&base_file_suffix))
             .map(|(_, size)| size)
             .sum::<u64>();
-        let sample_file_path =
-            FileSystemView::find_sample_base_file_path_from_records(&records, &base_file_format);
 
         if total_on_disk_size == 0 {
             return None;
         }
 
-        // Step 2: Use the cached estimator (or init it now).
-        // Return None if no sample file is found or estimator fails to initialize.
-        let estimator = self
-            .file_system_view
-            .get_or_init_estimator(&base_file_format, sample_file_path.as_deref())
-            .await?;
+        // Step 2: Use the cached estimator (seeded from the latest commit's sample).
+        // Return None if estimator is not available (non-Parquet, no sample, or read failed).
+        let latest_ts = self.timeline.get_latest_commit_timestamp().ok()?;
+        let estimator = self.get_or_init_estimator(&latest_ts).await?;
         let (estimated_total_byte_size, estimated_total_rows) =
             estimator.estimate(total_on_disk_size);
         // Estimator math is non-negative by construction (u64 size * f64 ratio).

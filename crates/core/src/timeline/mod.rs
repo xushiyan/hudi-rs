@@ -283,21 +283,19 @@ impl Timeline {
         resolve_data_schema_from_commit_metadata(&commit_metadata, self.storage.clone()).await
     }
 
-    /// Get the latest completed commit instant whose request timestamp is ≤ `timestamp`.
-    ///
-    /// Returns `None` if no such commit exists.
-    pub(crate) fn get_latest_commit_at_or_before(
+    /// Get all completed commit instants whose request timestamp is ≤ `timestamp`,
+    /// sorted ascending by timestamp.
+    pub(crate) fn get_completed_commits_at_or_before(
         &self,
         timestamp: &str,
-    ) -> Result<Option<Instant>> {
+    ) -> Result<Vec<Instant>> {
         let selector = TimelineSelector::completed_actions_in_range(
             DEFAULT_LOADING_ACTIONS,
             self.hudi_configs.clone(),
             None,
             Some(timestamp),
         )?;
-        let mut commits = selector.select(self)?;
-        Ok(commits.pop())
+        selector.select(self)
     }
 
     pub(crate) async fn get_replaced_file_groups_as_of(
