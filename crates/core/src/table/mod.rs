@@ -235,7 +235,10 @@ impl Table {
             let Ok(parsed) = HoodieCommitMetadata::from_json_map(&metadata) else {
                 continue;
             };
-            if let Some(path) = parsed.iter_base_file_paths().next() {
+            // Pick a stable sample path so estimator-derived stats are reproducible.
+            // `partition_to_write_stats` is a HashMap, so raw iteration order is
+            // non-deterministic across process runs.
+            if let Some(path) = parsed.iter_base_file_paths().min() {
                 return Some(path);
             }
         }
