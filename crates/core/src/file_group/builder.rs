@@ -78,8 +78,9 @@ pub fn file_groups_from_commit_metadata<V: CompletionTimeView>(
 /// * `commit_metadata` - The commit metadata JSON map
 /// * `completion_time_view` - View to look up completion timestamps.
 /// * `estimator` - Optional [FileStatsEstimator] used to populate `byte_size`
-///   and `num_records` on each base file. When `None`, those fields stay at 0
-///   while `size` is still populated from `HoodieWriteStat::file_size_in_bytes`.
+///   and `num_records` on each base file. When `None`, those fields stay at 0.
+///   `size` is populated from `HoodieWriteStat::file_size_in_bytes` only when
+///   the write stat path identifies the base file.
 pub(crate) fn file_groups_from_commit_metadata_with_estimator<V: CompletionTimeView>(
     commit_metadata: &Map<String, Value>,
     completion_time_view: &V,
@@ -117,10 +118,20 @@ pub(crate) fn file_groups_from_commit_metadata_with_estimator<V: CompletionTimeV
         let mut base_file = BaseFile::from_str(&base_file_name)?;
         base_file.set_completion_time(completion_time_view);
 
-        // Populate FileMetadata when we have a recorded on-disk size. This aligns
-        // the incremental query path with file_groups_from_files_partition_records
-        // so query engines see size/byte_size/num_records consistently.
-        if let Some(file_size) = write_stat.file_size_in_bytes.filter(|s| *s > 0) {
+        let path_file_name = write_stat
+            .path
+            .as_deref()
+            .and_then(|path| Path::new(path).file_name())
+            .and_then(|name| name.to_str());
+        let write_stat_size_is_for_base_file = path_file_name == Some(base_file_name.as_str());
+
+        // Populate FileMetadata only when the write-stat size belongs to the base
+        // file. MOR delta commits can have `baseFile` set while `path` and
+        // `fileSizeInBytes` describe a newly written log file.
+        if let Some(file_size) = write_stat
+            .file_size_in_bytes
+            .filter(|s| write_stat_size_is_for_base_file && *s > 0)
+        {
             let size = file_size as u64;
             let (byte_size, num_records) = estimator.map(|e| e.estimate(size)).unwrap_or((0, 0));
             base_file.file_metadata = Some(FileMetadata {
@@ -714,6 +725,7 @@ mod tests {
                     "p1": [{
                         "fileId": "fid-0",
                         "baseFile": "fid-0_0-7-24_20240418173200000.parquet",
+                        "path": "p1/fid-0_0-7-24_20240418173200000.parquet",
                         "fileSizeInBytes": 4096
                     }]
                 }
@@ -766,6 +778,43 @@ mod tests {
             assert_eq!(m.size, 4096);
             assert_eq!(m.byte_size, 10240); // 4096 * 2.5
             assert_eq!(m.num_records, 40); // 4096 / 100
+        }
+
+        #[test]
+        fn test_mor_log_write_stat_does_not_assign_log_size_to_base_file() {
+            let json = r#"{
+                "partitionToWriteStats": {
+                    "p1": [{
+                        "fileId": "fid-0",
+                        "baseFile": "fid-0_0-7-24_20240418173200000.parquet",
+                        "path": "p1/.fid-0_20240418173200000.log.1_0-8-25",
+                        "fileSizeInBytes": 1148,
+                        "logFiles": [
+                            ".fid-0_20240418173200000.log.1_0-8-25"
+                        ]
+                    }]
+                }
+            }"#;
+            let metadata: Map<String, Value> = serde_json::from_str(json).unwrap();
+            let estimator = FileStatsEstimator::new(100.0, 2.5);
+
+            let groups = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                Some(&estimator),
+            )
+            .unwrap();
+            let file_slice = groups
+                .iter()
+                .next()
+                .unwrap()
+                .file_slices
+                .values()
+                .next()
+                .unwrap();
+
+            assert_eq!(file_slice.log_files.len(), 1);
+            assert!(file_slice.base_file.file_metadata.is_none());
         }
 
         #[test]
