@@ -341,19 +341,6 @@ impl FileGroupReader {
         relative_path: &str,
         options: &ReadOptions,
     ) -> Result<BoxStream<'static, Result<RecordBatch>>> {
-        use crate::config::table::BaseFileFormatValue;
-
-        // Validate base file format is parquet
-        let base_file_format: String = self
-            .hudi_configs
-            .get_or_default(HudiTableConfig::BaseFileFormat)
-            .into();
-        if !base_file_format.eq_ignore_ascii_case(BaseFileFormatValue::Parquet.as_ref()) {
-            return Err(ReadFileSliceError(format!(
-                "Streaming read only supports parquet format, got: {base_file_format}"
-            )));
-        }
-
         let default_batch_size: usize = self
             .hudi_configs
             .get_or_default(HudiReadConfig::StreamBatchSize)
@@ -868,7 +855,9 @@ mod tests {
 
         assert!(result.is_err(), "Should return error for non-existent file");
 
-        let error_msg = result.unwrap_err().to_string();
+        let error_msg = result
+            .expect_err("Expected file not found error")
+            .to_string();
         assert!(
             error_msg.contains("not found") || error_msg.contains("Failed to read path"),
             "Should contain appropriate error message, got: {error_msg}"

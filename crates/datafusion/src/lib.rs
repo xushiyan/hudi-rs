@@ -39,13 +39,16 @@ use datafusion::logical_expr::Operator;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::DFSchema;
 use datafusion_common::DataFusionError::Execution;
+use datafusion_common::Statistics;
 use datafusion_common::config::TableParquetOptions;
+use datafusion_common::stats::Precision;
 use datafusion_expr::{CreateExternalTable, Expr, TableProviderFilterPushDown, TableType};
 use datafusion_physical_expr::create_physical_expr;
 use log::warn;
 
 use crate::util::expr::exprs_to_filters;
 use hudi_core::config::read::HudiReadConfig::{InputPartitions, UseReadOptimizedMode};
+use hudi_core::config::table::{BaseFileFormatValue, HudiTableConfig};
 use hudi_core::config::util::empty_options;
 use hudi_core::storage::util::{get_scheme_authority, join_url_segments};
 use hudi_core::table::Table as HudiTable;
@@ -89,6 +92,8 @@ pub struct HudiDataSource {
     /// This is cached at construction since partition schema rarely changes
     /// and is needed synchronously in `supports_filters_pushdown`.
     partition_schema: Schema,
+    /// Cached table-level statistics for join ordering and broadcast decisions.
+    cached_stats: Option<Statistics>,
 }
 
 impl std::fmt::Debug for HudiDataSource {
@@ -123,6 +128,16 @@ impl HudiDataSource {
             .await
             .map_err(|e| Execution(format!("Failed to create Hudi table: {e}")))?;
 
+        let base_file_format: String = table
+            .hudi_configs
+            .get_or_default(HudiTableConfig::BaseFileFormat)
+            .into();
+        if !base_file_format.eq_ignore_ascii_case(BaseFileFormatValue::Parquet.as_ref()) {
+            return Err(Execution(format!(
+                "Unsupported base file format '{base_file_format}' for HudiDataSource; only parquet is supported"
+            )));
+        }
+
         // Cache schema with meta fields at construction for synchronous access
         let schema = table
             .get_schema_with_meta_fields()
@@ -142,10 +157,34 @@ impl HudiDataSource {
             }
         };
 
+        // Compute table-level statistics for join ordering and broadcast decisions.
+        // Uses MDT files partition for base-file sizes and, for Parquet tables, one
+        // sampled footer to infer row counts and byte sizes without loading all file groups.
+        // Falls back to None if statistics cannot be derived.
+        let cached_stats = match table.compute_table_stats().await {
+            Some((num_rows, total_byte_size)) => {
+                let num_fields = schema.fields().len();
+                // Saturate on 32-bit targets where `u64` cannot fit into `usize`;
+                // on 64-bit this is a lossless conversion.
+                let num_rows = usize::try_from(num_rows).unwrap_or(usize::MAX);
+                let total_byte_size = usize::try_from(total_byte_size).unwrap_or(usize::MAX);
+                Some(Statistics {
+                    num_rows: Precision::Inexact(num_rows),
+                    total_byte_size: Precision::Inexact(total_byte_size),
+                    column_statistics: vec![
+                        datafusion_common::ColumnStatistics::new_unknown();
+                        num_fields
+                    ],
+                })
+            }
+            None => None,
+        };
+
         Ok(Self {
             table: Arc::new(table),
             schema,
             partition_schema,
+            cached_stats,
         })
     }
 
@@ -285,6 +324,10 @@ impl TableProvider for HudiDataSource {
         TableType::Base
     }
 
+    fn statistics(&self) -> Option<Statistics> {
+        self.cached_stats.clone()
+    }
+
     async fn scan(
         &self,
         state: &dyn Session,
@@ -317,8 +360,17 @@ impl TableProvider for HudiDataSource {
             n => n,
         };
 
-        // Convert Datafusion `Expr` to `Filter`
-        let pushdown_filters = exprs_to_filters(filters);
+        // Only push down partition column filters to Hudi's file listing layer.
+        // Non-partition filters would trigger Parquet footer reads for file-level
+        // stats pruning, which is redundant since DataFusion's ParquetSource already
+        // handles row-group/page-level pruning during the scan.
+        let partition_cols = self.get_partition_columns();
+        let partition_filters: Vec<Expr> = filters
+            .iter()
+            .filter(|expr| Self::is_partition_column_filter(expr, &partition_cols))
+            .cloned()
+            .collect();
+        let pushdown_filters = exprs_to_filters(&partition_filters);
         let file_slices = self
             .table
             .get_file_slices_splits(input_partitions, pushdown_filters)
@@ -370,11 +422,18 @@ impl TableProvider for HudiDataSource {
             .map(FileGroup::from)
             .collect();
 
-        let fsc = FileScanConfigBuilder::new(url, Arc::new(parquet_source))
+        let mut fsc_builder = FileScanConfigBuilder::new(url, Arc::new(parquet_source))
             .with_file_groups(file_groups)
             .with_projection_indices(projection.cloned())?
-            .with_limit(limit)
-            .build();
+            .with_limit(limit);
+
+        // Pass table statistics to the physical plan so DataFusion's join_selection
+        // optimizer can swap build/probe sides and choose broadcast joins.
+        if let Some(stats) = &self.cached_stats {
+            fsc_builder = fsc_builder.with_statistics(stats.clone());
+        }
+
+        let fsc = fsc_builder.build();
 
         Ok(Arc::new(DataSourceExec::new(Arc::new(fsc))))
     }
@@ -487,6 +546,8 @@ impl TableProviderFactory for HudiTableFactory {
 mod tests {
     use super::*;
     use datafusion_common::{Column, ScalarValue};
+    use hudi_core::config::internal::HudiInternalConfig;
+    use hudi_core::config::table::{BaseFileFormatValue, HudiTableConfig};
     use std::fs::canonicalize;
     use std::path::Path;
     use url::Url;
@@ -502,7 +563,38 @@ mod tests {
             Url::from_file_path(canonicalize(Path::new("tests/data/table_props_valid")).unwrap())
                 .unwrap();
         let hudi = HudiDataSource::new(base_url.as_str()).await.unwrap();
-        assert_eq!(hudi.get_input_partitions(), 0)
+        assert_eq!(hudi.get_input_partitions(), 0);
+        assert_eq!(hudi.table_type(), TableType::Base);
+        assert_eq!(hudi.statistics(), None);
+    }
+
+    #[tokio::test]
+    async fn test_new_with_options_fails_fast_on_non_parquet_base_file_format() {
+        let result = HudiDataSource::new_with_options(
+            V6Nonpartitioned.path_to_cow().as_str(),
+            [
+                (
+                    HudiTableConfig::BaseFileFormat.as_ref(),
+                    BaseFileFormatValue::HFile.as_ref(),
+                ),
+                (HudiInternalConfig::SkipConfigValidation.as_ref(), "true"),
+            ],
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "Expected constructor fail-fast for unsupported base file format"
+        );
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("Unsupported base file format 'hfile'"),
+            "Expected explicit base format error, got: {error_msg}"
+        );
+        assert!(
+            error_msg.contains("only parquet is supported"),
+            "Expected parquet-only guidance, got: {error_msg}"
+        );
     }
 
     #[tokio::test]

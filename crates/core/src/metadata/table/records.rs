@@ -195,6 +195,14 @@ impl FilesPartitionRecord {
             .collect()
     }
 
+    /// Get active (non-deleted) files with their on-disk sizes.
+    pub fn active_files_with_sizes(&self) -> impl Iterator<Item = (&str, u64)> {
+        self.files
+            .values()
+            .filter(|f| !f.is_deleted)
+            .map(|f| (f.name.as_str(), f.size.max(0) as u64))
+    }
+
     /// Get list of all file names (including deleted).
     pub fn all_file_names(&self) -> Vec<&str> {
         self.files.keys().map(|s| s.as_str()).collect()

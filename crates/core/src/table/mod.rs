@@ -89,7 +89,7 @@
 
 pub mod builder;
 pub mod file_pruner;
-mod fs_view;
+pub(crate) mod fs_view;
 mod listing;
 pub mod partition;
 mod read_options;
@@ -122,18 +122,48 @@ use arrow::record_batch::RecordBatch;
 use arrow_schema::{Field, Schema};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::OnceCell;
 use url::Url;
 
 /// The main struct that provides table APIs for interacting with a Hudi table.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Table {
     pub hudi_configs: Arc<HudiConfigs>,
     pub storage_options: Arc<HashMap<String, String>>,
     pub timeline: Timeline,
     pub file_system_view: FileSystemView,
+    /// Cached metadata table instance, lazily initialized on first use.
+    /// Only populated when metadata table is enabled (v8+ with files partition).
+    /// Shared across clones via `Arc` so all scan() calls reuse the same instance.
+    cached_metadata_table: Arc<OnceCell<Table>>,
+}
+
+impl Clone for Table {
+    fn clone(&self) -> Self {
+        Self {
+            hudi_configs: self.hudi_configs.clone(),
+            storage_options: self.storage_options.clone(),
+            timeline: self.timeline.clone(),
+            file_system_view: self.file_system_view.clone(),
+            cached_metadata_table: self.cached_metadata_table.clone(),
+        }
+    }
 }
 
 impl Table {
+    /// Get or initialize the cached metadata table instance.
+    ///
+    /// Returns `Ok(&Table)` if metadata table is successfully created or was already cached.
+    /// The instance is created once and reused across all subsequent calls.
+    pub(crate) async fn get_or_init_metadata_table(&self) -> Result<&Table> {
+        self.cached_metadata_table
+            .get_or_try_init(|| async {
+                log::debug!("Initializing cached metadata table instance");
+                self.new_metadata_table().await
+            })
+            .await
+    }
+
     /// Create hudi table by base_uri
     pub async fn new(base_uri: &str) -> Result<Self> {
         TableBuilder::from_base_uri(base_uri).build().await
@@ -409,10 +439,9 @@ impl Table {
         // Create file pruner with filters on non-partition columns
         let file_pruner = FilePruner::new(filters, &table_schema, &partition_schema)?;
 
-        // Try to create metadata table instance if enabled
+        // Use cached metadata table instance if enabled
         let metadata_table = if self.is_metadata_table_enabled() {
-            log::debug!("Using metadata table for file listing");
-            match self.new_metadata_table().await {
+            match self.get_or_init_metadata_table().await {
                 Ok(mdt) => Some(mdt),
                 Err(e) => {
                     log::warn!(
@@ -431,7 +460,7 @@ impl Table {
                 &file_pruner,
                 &table_schema,
                 &timeline_view,
-                metadata_table.as_ref(),
+                metadata_table,
             )
             .await
     }
@@ -803,12 +832,77 @@ impl Table {
 
         Ok(Box::pin(combined_stream))
     }
+
+    /// Compute estimated table-level statistics from the metadata table for scan planning.
+    ///
+    /// Returns `(estimated_num_rows, estimated_total_byte_size)` where byte size is the
+    /// estimated uncompressed in-memory size.
+    ///
+    /// The approach:
+    /// 1. Read MDT files partition to get all active base files with on-disk sizes
+    /// 2. For Parquet tables, read ONE sampled footer to derive a compression ratio
+    /// 3. Infer total rows and byte size for all base files
+    ///
+    /// Only base files are counted (log files are excluded).
+    ///
+    /// TODO: support including log files in the estimation for MOR tables for scan planning.
+    ///
+    /// Returns `None` if metadata table is not enabled or if statistics cannot be computed.
+    pub async fn compute_table_stats(&self) -> Option<(u64, u64)> {
+        if !self.is_metadata_table_enabled() {
+            return None;
+        }
+
+        // Step 1: Get MDT files partition records (cached on the MDT instance).
+        let partition_schema = self.get_partition_schema().await.ok()?;
+        let hudi_configs = self.hudi_configs.as_ref();
+        let partition_pruner = PartitionPruner::new(&[], &partition_schema, hudi_configs).ok()?;
+        let mdt = self.get_or_init_metadata_table().await.ok()?;
+        let records = mdt
+            .fetch_files_partition_records(&partition_pruner)
+            .await
+            .ok()?;
+
+        // Only count base files (exclude log files which start with '.').
+        let base_file_format = self.file_system_view.base_file_format();
+        let base_file_suffix = format!(".{}", base_file_format.as_ref());
+        let total_on_disk_size = records
+            .values()
+            .filter(|record| !record.is_all_partitions())
+            .flat_map(|record| record.active_files_with_sizes())
+            .filter(|(name, _)| name.ends_with(&base_file_suffix))
+            .map(|(_, size)| size)
+            .sum::<u64>();
+        let sample_file_path =
+            FileSystemView::find_sample_base_file_path_from_records(&records, &base_file_format);
+
+        if total_on_disk_size == 0 {
+            return None;
+        }
+
+        // Step 2: Use the cached estimator (or init it now).
+        // Return None if no sample file is found or estimator fails to initialize.
+        let estimator = self
+            .file_system_view
+            .get_or_init_estimator(&base_file_format, sample_file_path.as_deref())
+            .await?;
+        let (estimated_total_byte_size, estimated_total_rows) =
+            estimator.estimate(total_on_disk_size);
+        // Estimator math is non-negative by construction (u64 size * f64 ratio).
+        // `i64 -> u64` via `max(0) as u64` defends against any future change.
+        Some((
+            estimated_total_rows.max(0) as u64,
+            estimated_total_byte_size.max(0) as u64,
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::HUDI_CONF_DIR;
+    use crate::config::internal::HudiInternalConfig;
+    use crate::config::table::BaseFileFormatValue;
     use crate::config::table::HudiTableConfig::{
         BaseFileFormat, Checksum, DatabaseName, DropsPartitionFields, IsHiveStylePartitioning,
         IsPartitionPathUrlencoded, KeyGeneratorClass, PartitionFields, PopulatesMetaFields,
@@ -817,6 +911,7 @@ mod tests {
     };
     use crate::config::util::{empty_filters, empty_options};
     use crate::error::CoreError;
+    use crate::file_group::FileGroup;
     use crate::metadata::meta_field::MetaField;
     use crate::storage::Storage;
     use crate::storage::util::join_url_segments;
@@ -895,6 +990,34 @@ mod tests {
                 "Storage option value for key '{key}' should not be empty"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_hudi_table_storage_options_accessor_and_is_mor() {
+        let cow_base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let cow_table = Table::new(cow_base_url.path()).await.unwrap();
+        assert_eq!(
+            cow_table.storage_options(),
+            cow_table.storage_options.as_ref().clone()
+        );
+        assert!(!cow_table.is_mor());
+
+        let mor_base_url =
+            SampleTable::V6SimplekeygenNonhivestyleOverwritetable.url_to_mor_parquet();
+        let mor_table = Table::new(mor_base_url.path()).await.unwrap();
+        assert!(mor_table.is_mor());
+    }
+
+    #[cfg(feature = "datafusion")]
+    #[tokio::test]
+    async fn test_hudi_table_register_storage() {
+        use datafusion::execution::runtime_env::RuntimeEnv;
+        use std::sync::Arc;
+
+        let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+        let runtime_env = Arc::new(RuntimeEnv::default());
+        hudi_table.register_storage(runtime_env);
     }
 
     #[tokio::test]
@@ -1222,6 +1345,123 @@ mod tests {
             .unwrap();
         assert_eq!(batches.num_rows(), 4);
         assert_eq!(batches.num_columns(), 21);
+    }
+
+    #[tokio::test]
+    async fn hudi_table_read_snapshot_and_as_of() {
+        let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+        let latest_timestamp = hudi_table.timeline.get_latest_commit_timestamp().unwrap();
+
+        let snapshot_batches = hudi_table.read_snapshot(empty_filters()).await.unwrap();
+        assert!(!snapshot_batches.is_empty());
+        let snapshot_rows = snapshot_batches
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum::<usize>();
+        assert!(snapshot_rows > 0);
+
+        let as_of_batches = hudi_table
+            .read_snapshot_as_of(&latest_timestamp, empty_filters())
+            .await
+            .unwrap();
+        assert!(!as_of_batches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_hudi_table_read_apis_return_empty() {
+        use futures::StreamExt;
+
+        let base_url = SampleTable::V6Empty.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+
+        let snapshot_batches = hudi_table.read_snapshot(empty_filters()).await.unwrap();
+        assert!(snapshot_batches.is_empty());
+
+        let incremental_batches = hudi_table
+            .read_incremental_records(EARLIEST_START_TIMESTAMP, None)
+            .await
+            .unwrap();
+        assert!(incremental_batches.is_empty());
+
+        let mut snapshot_stream = hudi_table
+            .read_snapshot_stream(&ReadOptions::new())
+            .await
+            .unwrap();
+        assert!(snapshot_stream.next().await.is_none());
+
+        let file_group = FileGroup::new_with_base_file_name(
+            "a079bdb3-731c-4894-b855-abfcd6921007-0_0-203-274_20240418173551906.parquet",
+            "",
+        )
+        .unwrap();
+        let file_slice = file_group
+            .get_file_slice_as_of("20240418173551906")
+            .unwrap()
+            .clone();
+        let mut file_slice_stream = hudi_table
+            .read_file_slice_stream(&file_slice, &ReadOptions::new())
+            .await
+            .unwrap();
+        assert!(file_slice_stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn hudi_table_read_file_slice_stream_reads_batches() {
+        use futures::TryStreamExt;
+
+        let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+        let file_slices = hudi_table.get_file_slices(empty_filters()).await.unwrap();
+        let file_slice = file_slices.first().unwrap().clone();
+        let options = ReadOptions::new().with_batch_size(2);
+
+        let stream = hudi_table
+            .read_file_slice_stream(&file_slice, &options)
+            .await
+            .unwrap();
+        let batches = stream.try_collect::<Vec<_>>().await.unwrap();
+        assert!(!batches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hudi_table_read_snapshot_stream_returns_batches_with_options() {
+        use futures::TryStreamExt;
+
+        let base_url = SampleTable::V6SimplekeygenNonhivestyle.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+        let options = ReadOptions::new()
+            .with_filters([("byteField", ">=", "10")])
+            .with_projection(["id"])
+            .with_batch_size(2);
+
+        let stream = hudi_table.read_snapshot_stream(&options).await.unwrap();
+        let batches = stream.try_collect::<Vec<_>>().await.unwrap();
+        assert!(!batches.is_empty());
+        assert!(batches[0].column_by_name("id").is_some());
+    }
+
+    #[tokio::test]
+    async fn hudi_table_read_snapshot_stream_returns_empty_when_no_file_slices_match_filters() {
+        use futures::StreamExt;
+
+        let base_url = SampleTable::V6SimplekeygenNonhivestyle.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+        let options = ReadOptions::new().with_filters([("byteField", "=", "999")]);
+
+        let mut stream = hudi_table.read_snapshot_stream(&options).await.unwrap();
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn hudi_table_read_incremental_records() {
+        let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let hudi_table = Table::new(base_url.path()).await.unwrap();
+        let batches = hudi_table
+            .read_incremental_records(EARLIEST_START_TIMESTAMP, None)
+            .await
+            .unwrap();
+        assert!(!batches.is_empty());
     }
 
     #[tokio::test]
@@ -1558,5 +1798,136 @@ mod tests {
             .collect::<HashSet<_>>();
         let expected = HashSet::new();
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn test_compute_table_stats_with_mdt() {
+        use hudi_test::QuickstartTripsTable;
+        let table_path = QuickstartTripsTable::V8Trips8I3U1D.path_to_mor_avro();
+        let table = Table::new(&table_path).await.unwrap();
+        assert!(table.is_metadata_table_enabled());
+
+        let stats = table.compute_table_stats().await;
+        assert!(
+            stats.is_some(),
+            "Stats should be Some for MDT-enabled table"
+        );
+        let (rows, bytes) = stats.unwrap();
+        assert!(rows > 0, "Should have estimated rows > 0, got {rows}");
+        assert!(bytes > 0, "Should have estimated bytes > 0, got {bytes}");
+    }
+
+    #[tokio::test]
+    async fn test_compute_table_stats_with_sample_mdt_table() {
+        let base_url = SampleTable::V9TxnsSimpleMeta.url_to_cow();
+        let table = Table::new(base_url.path()).await.unwrap();
+        assert!(table.is_metadata_table_enabled());
+
+        let stats = table.compute_table_stats().await;
+        assert!(stats.is_some(), "Stats should be Some for sample MDT table");
+        let (rows, bytes) = stats.unwrap();
+        assert!(rows > 0);
+        assert!(bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn test_compute_table_stats_returns_none_when_base_file_extension_does_not_match() {
+        let base_url = SampleTable::V9TxnsSimpleMeta.url_to_cow();
+        let table = Table::new_with_options(
+            base_url.path(),
+            [
+                (BaseFileFormat.as_ref(), BaseFileFormatValue::HFile.as_ref()),
+                (HudiInternalConfig::SkipConfigValidation.as_ref(), "true"),
+            ],
+        )
+        .await
+        .unwrap();
+        assert!(table.is_metadata_table_enabled());
+        assert!(table.compute_table_stats().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_compute_table_stats_without_mdt() {
+        let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let table = Table::new(base_url.path()).await.unwrap();
+        assert!(!table.is_metadata_table_enabled());
+
+        let stats = table.compute_table_stats().await;
+        assert!(stats.is_none(), "Stats should be None for non-MDT table");
+    }
+
+    #[tokio::test]
+    async fn test_clone_table_with_mdt() {
+        let base_url = SampleTable::V9TxnsNonpartMeta.url_to_mor_avro();
+        let table = Table::new(base_url.path()).await.unwrap();
+        assert!(table.is_metadata_table_enabled());
+
+        let cloned = table.clone();
+        assert_eq!(cloned.table_name(), table.table_name());
+        assert_eq!(cloned.table_type(), table.table_type());
+
+        // Clone shares the cached metadata table via Arc<OnceCell>
+        let file_slices = cloned.get_file_slices(empty_filters()).await.unwrap();
+        assert!(!file_slices.is_empty());
+
+        // compute_table_stats works on cloned table
+        let stats = cloned.compute_table_stats().await;
+        assert!(stats.is_some());
+        let (rows, bytes) = stats.unwrap();
+        assert!(rows > 0);
+        assert!(bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_slices_falls_back_to_storage_when_metadata_table_init_fails() {
+        let base_url = SampleTable::V9TxnsSimpleNometa.url_to_cow();
+        let table = Table::new_with_options(base_url.path(), [("hoodie.metadata.enable", "true")])
+            .await
+            .unwrap();
+        assert!(table.is_metadata_table_enabled());
+
+        let file_slices = table.get_file_slices(empty_filters()).await.unwrap();
+        assert!(!file_slices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_file_slices_with_mdt() {
+        let base_url = SampleTable::V9TxnsSimpleMeta.url_to_cow();
+        let table = Table::new(base_url.path()).await.unwrap();
+        assert!(table.is_metadata_table_enabled());
+
+        // This exercises the MDT code path in get_file_slices_internal:
+        // metadata table init, fetch_files_partition_records, and
+        // fs_view's load_file_groups with estimator
+        let file_slices = table.get_file_slices(empty_filters()).await.unwrap();
+        assert!(!file_slices.is_empty());
+
+        // Verify file metadata is populated from MDT with estimated stats
+        for fsl in &file_slices {
+            let metadata = fsl.base_file.file_metadata.as_ref().unwrap();
+            assert!(metadata.size > 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_file_slices_with_mdt_quickstart_table() {
+        use hudi_test::QuickstartTripsTable;
+
+        let table_path = QuickstartTripsTable::V8Trips8I3U1D.path_to_mor_avro();
+        let table = Table::new(&table_path).await.unwrap();
+        assert!(table.is_metadata_table_enabled());
+
+        let metadata_table = table.get_or_init_metadata_table().await.unwrap();
+        let partition_schema = table.get_partition_schema().await.unwrap();
+        let partition_pruner =
+            PartitionPruner::new(&[], &partition_schema, table.hudi_configs.as_ref()).unwrap();
+        let records = metadata_table
+            .fetch_files_partition_records(&partition_pruner)
+            .await
+            .unwrap();
+        assert!(!records.is_empty());
+
+        let file_slices = table.get_file_slices(empty_filters()).await.unwrap();
+        assert!(!file_slices.is_empty());
     }
 }
