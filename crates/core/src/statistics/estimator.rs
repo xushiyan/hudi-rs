@@ -17,6 +17,9 @@
  * under the License.
  */
 
+use crate::Result;
+use crate::storage::Storage;
+
 /// Cached ratios derived from a single base file sample.
 /// Used to estimate `byte_size` and `num_records` for all files.
 ///
@@ -37,6 +40,38 @@ impl FileStatsEstimator {
         }
     }
 
+    /// Build an estimator by reading a single Parquet footer.
+    pub(crate) async fn from_parquet_footer(
+        storage: &Storage,
+        relative_path: &str,
+    ) -> Result<Self> {
+        let parquet_meta = storage.get_parquet_file_metadata(relative_path).await?;
+        let on_disk: i64 = parquet_meta
+            .row_groups()
+            .iter()
+            .map(|rg| rg.compressed_size())
+            .sum();
+        let uncompressed: i64 = parquet_meta
+            .row_groups()
+            .iter()
+            .map(|rg| rg.total_byte_size())
+            .sum();
+        let num_rows = parquet_meta.file_metadata().num_rows();
+
+        let compression_ratio = if on_disk > 0 {
+            uncompressed as f64 / on_disk as f64
+        } else {
+            1.0
+        };
+        let avg_row_size_on_disk = if num_rows > 0 {
+            on_disk as f64 / num_rows as f64
+        } else {
+            0.0
+        };
+
+        Ok(Self::new(avg_row_size_on_disk, compression_ratio))
+    }
+
     /// Estimate metadata fields from on-disk size.
     pub(crate) fn estimate(&self, size: u64) -> (i64, i64) {
         let byte_size = (size as f64 * self.compression_ratio) as i64;
@@ -51,7 +86,77 @@ impl FileStatsEstimator {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::path::Path;
+    use std::sync::Arc;
+
     use super::*;
+    use crate::config::HudiConfigs;
+    use crate::config::table::HudiTableConfig::BasePath;
+    use arrow_array::{Int64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+    use tempfile::tempdir;
+    use url::Url;
+
+    fn write_single_row_parquet_file(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1_i64]))],
+        )
+        .unwrap();
+
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    fn write_empty_parquet_file(path: &Path) {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let file = File::create(path).unwrap();
+        let writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.close().unwrap();
+    }
+
+    async fn new_storage_at(base_url: &Url) -> Arc<Storage> {
+        let hudi_configs = Arc::new(HudiConfigs::new([(BasePath.as_ref(), base_url.as_str())]));
+        Storage::new(Arc::new(HashMap::new()), hudi_configs).unwrap()
+    }
+
+    #[tokio::test]
+    async fn from_parquet_footer_handles_success_and_edge_cases() {
+        let temp_dir = tempdir().unwrap();
+        let base_url = Url::from_directory_path(temp_dir.path()).unwrap();
+        let storage = new_storage_at(&base_url).await;
+
+        let sample_path = temp_dir.path().join("sample.parquet");
+        write_single_row_parquet_file(&sample_path);
+        let estimator = FileStatsEstimator::from_parquet_footer(&storage, "sample.parquet")
+            .await
+            .unwrap();
+        let (_, rows) = estimator.estimate(1024);
+        assert!(rows > 0);
+
+        let empty_path = temp_dir.path().join("empty.parquet");
+        write_empty_parquet_file(&empty_path);
+        let empty_estimator = FileStatsEstimator::from_parquet_footer(&storage, "empty.parquet")
+            .await
+            .unwrap();
+        let (estimated_size, estimated_rows) = empty_estimator.estimate(1024);
+        assert_eq!(estimated_size, 1024);
+        assert_eq!(estimated_rows, 0);
+    }
 
     #[test]
     fn test_estimate_normal() {

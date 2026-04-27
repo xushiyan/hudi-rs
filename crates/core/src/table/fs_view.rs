@@ -84,44 +84,6 @@ impl FileSystemView {
         })
     }
 
-    /// Initialize the file stats estimator by reading a single Parquet footer.
-    async fn init_parquet_file_stats_estimator(
-        &self,
-        relative_path: &str,
-    ) -> crate::Result<FileStatsEstimator> {
-        let parquet_meta = self
-            .storage
-            .get_parquet_file_metadata(relative_path)
-            .await?;
-        let on_disk: i64 = parquet_meta
-            .row_groups()
-            .iter()
-            .map(|rg| rg.compressed_size())
-            .sum();
-        let uncompressed: i64 = parquet_meta
-            .row_groups()
-            .iter()
-            .map(|rg| rg.total_byte_size())
-            .sum();
-        let num_rows = parquet_meta.file_metadata().num_rows();
-
-        let compression_ratio = if on_disk > 0 {
-            uncompressed as f64 / on_disk as f64
-        } else {
-            1.0
-        };
-        let avg_row_size_on_disk = if num_rows > 0 {
-            on_disk as f64 / num_rows as f64
-        } else {
-            0.0
-        };
-
-        Ok(FileStatsEstimator::new(
-            avg_row_size_on_disk,
-            compression_ratio,
-        ))
-    }
-
     /// Get or initialize the file stats estimator.
     pub(crate) async fn get_or_init_estimator(
         &self,
@@ -135,7 +97,7 @@ impl FileSystemView {
         if let Some(path) = sample_file_path {
             match self
                 .file_stats_estimator
-                .get_or_try_init(|| self.init_parquet_file_stats_estimator(path))
+                .get_or_try_init(|| FileStatsEstimator::from_parquet_footer(&self.storage, path))
                 .await
             {
                 Ok(estimator) => Some(estimator),
@@ -457,8 +419,6 @@ impl FileSystemView {
 mod tests {
     use std::collections::BTreeMap;
     use std::collections::HashMap;
-    use std::fs::File;
-    use std::path::Path;
     use std::sync::Arc;
 
     use super::*;
@@ -471,9 +431,7 @@ mod tests {
         FilesPartitionRecord, HoodieMetadataFileInfo, MetadataRecordType,
     };
     use crate::table::Table;
-    use arrow_array::{Int64Array, RecordBatch};
-    use arrow_schema::{DataType, Field, Schema};
-    use parquet::arrow::ArrowWriter;
+    use arrow_schema::Schema;
     use tempfile::tempdir;
     use url::Url;
 
@@ -514,35 +472,6 @@ mod tests {
                 .or_insert(0usize) += 1;
         }
         partition_counts
-    }
-
-    fn write_single_row_parquet_file(path: &Path) {
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "value",
-            DataType::Int64,
-            false,
-        )]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(vec![1_i64]))],
-        )
-        .unwrap();
-
-        let file = File::create(path).unwrap();
-        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
-        writer.write(&batch).unwrap();
-        writer.close().unwrap();
-    }
-
-    fn write_empty_parquet_file(path: &Path) {
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "value",
-            DataType::Int64,
-            false,
-        )]));
-        let file = File::create(path).unwrap();
-        let writer = ArrowWriter::try_new(file, schema, None).unwrap();
-        writer.close().unwrap();
     }
 
     async fn new_fs_view_with_base_path_and_format(
@@ -593,32 +522,6 @@ mod tests {
         let file_pruner = FilePruner::new(&filters, &table_schema, &partition_schema).unwrap();
         let as_of = hudi_table.timeline.get_latest_commit_timestamp().unwrap();
         (hudi_table, table_schema, file_pruner, as_of)
-    }
-
-    #[tokio::test]
-    async fn fs_view_init_estimator_handles_success_and_edge_cases() {
-        let temp_dir = tempdir().unwrap();
-        let base_url = Url::from_directory_path(temp_dir.path()).unwrap();
-        let fs_view = new_fs_view_with_base_path(&base_url).await;
-
-        let sample_path = temp_dir.path().join("sample.parquet");
-        write_single_row_parquet_file(&sample_path);
-        let estimator = fs_view
-            .init_parquet_file_stats_estimator("sample.parquet")
-            .await
-            .unwrap();
-        let (_, rows) = estimator.estimate(1024);
-        assert!(rows > 0);
-
-        let empty_path = temp_dir.path().join("empty.parquet");
-        write_empty_parquet_file(&empty_path);
-        let empty_estimator = fs_view
-            .init_parquet_file_stats_estimator("empty.parquet")
-            .await
-            .unwrap();
-        let (estimated_size, estimated_rows) = empty_estimator.estimate(1024);
-        assert_eq!(estimated_size, 1024);
-        assert_eq!(estimated_rows, 0);
     }
 
     #[tokio::test]
