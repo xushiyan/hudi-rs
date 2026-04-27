@@ -284,9 +284,9 @@ impl Timeline {
         resolve_data_schema_from_commit_metadata(&commit_metadata, self.storage.clone()).await
     }
 
-    /// Get all completed commit instants whose request timestamp is ≤ `timestamp`,
-    /// sorted ascending by timestamp.
-    pub(crate) fn get_completed_commits_at_or_before(
+    /// Get all completed instants (commit/deltacommit/replacecommit) whose
+    /// request timestamp is ≤ `timestamp`, sorted ascending by timestamp.
+    pub(crate) fn get_completed_instants_at_or_before(
         &self,
         timestamp: &str,
     ) -> Result<Vec<Instant>> {
@@ -337,7 +337,7 @@ impl Timeline {
         estimator: Option<&FileStatsEstimator>,
     ) -> Result<HashSet<FileGroup>> {
         use crate::file_group::builder::{
-            FileGroupMerger, file_groups_from_commit_metadata,
+            FileGroupMerger, file_groups_from_commit_metadata_with_estimator,
             replaced_file_groups_from_replace_commit,
         };
 
@@ -367,7 +367,7 @@ impl Timeline {
 
         for commit in commits {
             let commit_metadata = self.get_instant_metadata(&commit).await?;
-            file_groups.merge(file_groups_from_commit_metadata(
+            file_groups.merge(file_groups_from_commit_metadata_with_estimator(
                 &commit_metadata,
                 &completion_time_view,
                 estimator,

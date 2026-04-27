@@ -104,8 +104,8 @@ impl FileSystemView {
         files_partition_records: Option<&HashMap<String, FilesPartitionRecord>>,
         estimator: Option<&FileStatsEstimator>,
     ) -> Result<()> {
-        let base_file_extension = self.base_file_format();
-        let base_file_extension = base_file_extension.as_ref();
+        let base_file_format = self.base_file_format();
+        let base_file_extension = base_file_format.as_ref();
 
         let file_groups_map = if let Some(records) = files_partition_records {
             file_groups_from_files_partition_records(

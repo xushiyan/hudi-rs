@@ -138,10 +138,10 @@ pub struct Table {
     /// Only populated when metadata table is enabled (v8+ with files partition).
     /// Shared across clones via `Arc` so all scan() calls reuse the same instance.
     cached_metadata_table: Arc<OnceCell<Table>>,
-    /// Cached file stats estimator. Materialized on first call to
-    /// [`Table::get_or_init_estimator`]. `None` after init means "not applicable"
-    /// (non-Parquet base format, no sample path available, or footer read failed).
-    cached_estimator: Arc<OnceCell<Option<FileStatsEstimator>>>,
+    /// Cached file stats estimator. Materialized on first successful call to
+    /// [`Table::get_or_init_estimator`]. Failed or inapplicable attempts do not
+    /// populate the cache, allowing later calls with newer timestamps to retry.
+    cached_estimator: Arc<OnceCell<FileStatsEstimator>>,
 }
 
 impl Clone for Table {
@@ -174,14 +174,14 @@ impl Table {
     /// Get or initialize the cached `FileStatsEstimator` for this **data table**.
     ///
     /// This is the single point where eligibility for footer-based stats
-    /// estimation is validated. Returns `None` (cached as such) when:
+    /// estimation is validated. Returns `None` when:
     /// - The base file format is not Parquet (e.g., HFile metadata tables).
     /// - No sample base-file path can be derived from commit metadata at or
     ///   before `sample_at_timestamp`.
     /// - The parquet footer read fails for the sample path.
     ///
-    /// The first call materializes the cache; subsequent calls reuse the cached
-    /// `Option<FileStatsEstimator>` regardless of the timestamp passed in.
+    /// The cache is only materialized on successful initialization. This avoids
+    /// pinning a "no sample yet" state from an early timestamp.
     ///
     /// Not intended for use on metadata tables. MDTs use HFile, which already
     /// short-circuits via the format check below; this is documented for the
@@ -190,24 +190,28 @@ impl Table {
         &self,
         sample_at_timestamp: &str,
     ) -> Option<&FileStatsEstimator> {
+        if let Some(estimator) = self.cached_estimator.get() {
+            return Some(estimator);
+        }
+
+        // SINGLE point of parquet validation for the estimator concern.
+        if !matches!(
+            self.file_system_view.base_file_format(),
+            BaseFileFormatValue::Parquet
+        ) {
+            return None;
+        }
+
+        let path = self
+            .sample_base_file_path_at_or_before(sample_at_timestamp)
+            .await?;
+
         self.cached_estimator
-            .get_or_init(|| async {
-                // SINGLE point of parquet validation for the estimator concern.
-                if !matches!(
-                    self.file_system_view.base_file_format(),
-                    BaseFileFormatValue::Parquet
-                ) {
-                    return None;
-                }
-                let path = self
-                    .sample_base_file_path_at_or_before(sample_at_timestamp)
-                    .await?;
-                FileStatsEstimator::from_parquet_footer(&self.file_system_view.storage, &path)
-                    .await
-                    .ok()
+            .get_or_try_init(|| async {
+                FileStatsEstimator::from_parquet_footer(&self.file_system_view.storage, &path).await
             })
             .await
-            .as_ref()
+            .ok()
     }
 
     /// Sample one base file path active at or before the given timestamp.
@@ -226,7 +230,7 @@ impl Table {
     ) -> Option<String> {
         let commits = self
             .timeline
-            .get_completed_commits_at_or_before(timestamp)
+            .get_completed_instants_at_or_before(timestamp)
             .ok()?;
         for commit in commits.iter().rev() {
             let Ok(metadata) = self.timeline.get_instant_metadata(commit).await else {

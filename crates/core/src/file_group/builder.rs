@@ -66,10 +66,21 @@ impl FileGroupMerger for HashSet<FileGroup> {
 ///
 /// * `commit_metadata` - The commit metadata JSON map
 /// * `completion_time_view` - View to look up completion timestamps.
+pub fn file_groups_from_commit_metadata<V: CompletionTimeView>(
+    commit_metadata: &Map<String, Value>,
+    completion_time_view: &V,
+) -> Result<HashSet<FileGroup>> {
+    file_groups_from_commit_metadata_with_estimator(commit_metadata, completion_time_view, None)
+}
+
+/// # Arguments
+///
+/// * `commit_metadata` - The commit metadata JSON map
+/// * `completion_time_view` - View to look up completion timestamps.
 /// * `estimator` - Optional [FileStatsEstimator] used to populate `byte_size`
 ///   and `num_records` on each base file. When `None`, those fields stay at 0
 ///   while `size` is still populated from `HoodieWriteStat::file_size_in_bytes`.
-pub(crate) fn file_groups_from_commit_metadata<V: CompletionTimeView>(
+pub(crate) fn file_groups_from_commit_metadata_with_estimator<V: CompletionTimeView>(
     commit_metadata: &Map<String, Value>,
     completion_time_view: &V,
     estimator: Option<&FileStatsEstimator>,
@@ -343,8 +354,11 @@ mod tests {
             .clone();
 
             // Use layout v1 view (no completion time tracking)
-            let result =
-                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view(), None);
+            let result = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                None,
+            );
             // With the new implementation, this returns Ok with an empty HashSet
             // because iter_write_stats() returns an empty iterator when partition_to_write_stats is None
             assert!(result.is_ok());
@@ -362,8 +376,11 @@ mod tests {
             .unwrap()
             .clone();
 
-            let result =
-                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view(), None);
+            let result = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                None,
+            );
             assert!(matches!(
                 result,
                 Err(CoreError::CommitMetadata(msg)) if msg.contains("Failed to parse commit metadata")
@@ -383,8 +400,11 @@ mod tests {
             .unwrap()
             .clone();
 
-            let result =
-                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view(), None);
+            let result = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                None,
+            );
             assert!(matches!(
                 result,
                 Err(CoreError::CommitMetadata(msg)) if msg == "Missing fileId in write stats"
@@ -404,8 +424,11 @@ mod tests {
             .unwrap()
             .clone();
 
-            let result =
-                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view(), None);
+            let result = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                None,
+            );
             assert!(matches!(
                 result,
                 Err(CoreError::CommitMetadata(msg)) if msg == "Missing path in write stats"
@@ -426,8 +449,11 @@ mod tests {
             .unwrap()
             .clone();
 
-            let result =
-                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view(), None);
+            let result = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                None,
+            );
             assert!(matches!(
                 result,
                 Err(CoreError::CommitMetadata(msg)) if msg == "Invalid file name in path"
@@ -448,8 +474,11 @@ mod tests {
             .unwrap()
             .clone();
 
-            let result =
-                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view(), None);
+            let result = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                None,
+            );
             // Serde will fail to parse this and return a deserialization error
             assert!(matches!(
                 result,
@@ -471,8 +500,11 @@ mod tests {
             .unwrap()
             .clone();
 
-            let result =
-                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view(), None);
+            let result = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                None,
+            );
             // Serde will fail to parse this and return a deserialization error
             assert!(matches!(
                 result,
@@ -496,8 +528,11 @@ mod tests {
         }"#;
 
             let metadata: Map<String, Value> = serde_json::from_str(sample_json).unwrap();
-            let result =
-                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view(), None);
+            let result = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                None,
+            );
             assert!(result.is_ok());
             let file_groups = result.unwrap();
             assert_eq!(file_groups.len(), 2);
@@ -527,8 +562,11 @@ mod tests {
         }"#;
 
             let metadata: Map<String, Value> = serde_json::from_str(sample_json).unwrap();
-            let result =
-                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view(), None);
+            let result = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                None,
+            );
             assert!(result.is_ok());
             let file_groups = result.unwrap();
             assert_eq!(file_groups.len(), 1);
@@ -560,8 +598,11 @@ mod tests {
         }"#;
 
             let metadata: Map<String, Value> = serde_json::from_str(sample_json).unwrap();
-            let result =
-                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view(), None);
+            let result = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                None,
+            );
             assert!(result.is_ok());
             let file_groups = result.unwrap();
             assert_eq!(file_groups.len(), 1);
@@ -585,8 +626,11 @@ mod tests {
         }"#;
 
             let metadata: Map<String, Value> = serde_json::from_str(sample_json).unwrap();
-            let result =
-                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view(), None);
+            let result = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                None,
+            );
             assert!(result.is_ok());
             let file_groups = result.unwrap();
             assert_eq!(file_groups.len(), 1);
@@ -619,7 +663,7 @@ mod tests {
             }];
             let view = create_layout_v2_view(&instants);
 
-            let result = file_groups_from_commit_metadata(&metadata, &view, None);
+            let result = file_groups_from_commit_metadata_with_estimator(&metadata, &view, None);
             assert!(result.is_ok());
             let file_groups = result.unwrap();
             assert_eq!(file_groups.len(), 1);
@@ -646,9 +690,12 @@ mod tests {
             let metadata: Map<String, Value> = serde_json::from_str(json).unwrap();
 
             // No estimator -> only `size` is populated.
-            let groups =
-                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view(), None)
-                    .unwrap();
+            let groups = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                None,
+            )
+            .unwrap();
             let m = groups
                 .iter()
                 .next()
@@ -667,7 +714,7 @@ mod tests {
 
             // With estimator -> byte_size and num_records derived from on-disk size.
             let estimator = FileStatsEstimator::new(100.0, 2.5);
-            let groups = file_groups_from_commit_metadata(
+            let groups = file_groups_from_commit_metadata_with_estimator(
                 &metadata,
                 &create_layout_v1_view(),
                 Some(&estimator),
@@ -701,9 +748,12 @@ mod tests {
                 }
             }"#;
             let metadata: Map<String, Value> = serde_json::from_str(json).unwrap();
-            let groups =
-                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view(), None)
-                    .unwrap();
+            let groups = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                None,
+            )
+            .unwrap();
             let fs = groups
                 .iter()
                 .next()
