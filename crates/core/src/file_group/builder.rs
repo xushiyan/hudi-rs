@@ -677,6 +677,37 @@ mod tests {
         }
 
         #[test]
+        fn test_public_api_uses_no_estimator_for_cow_path_metadata() {
+            let json = r#"{
+                "partitionToWriteStats": {
+                    "p1": [{
+                        "fileId": "fid-0",
+                        "path": "p1/fid-0_0-7-24_20240418173200000.parquet",
+                        "fileSizeInBytes": 4096
+                    }]
+                }
+            }"#;
+            let metadata: Map<String, Value> = serde_json::from_str(json).unwrap();
+
+            let groups =
+                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view()).unwrap();
+            let file_slice = groups
+                .iter()
+                .next()
+                .unwrap()
+                .file_slices
+                .values()
+                .next()
+                .unwrap();
+            assert!(file_slice.log_files.is_empty());
+            let m = file_slice.base_file.file_metadata.as_ref().unwrap();
+            assert_eq!(m.name, "fid-0_0-7-24_20240418173200000.parquet");
+            assert_eq!(m.size, 4096);
+            assert_eq!(m.byte_size, 0);
+            assert_eq!(m.num_records, 0);
+        }
+
+        #[test]
         fn test_metadata_populated_from_write_stat_size() {
             let json = r#"{
                 "partitionToWriteStats": {

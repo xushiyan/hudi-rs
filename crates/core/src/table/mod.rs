@@ -1910,6 +1910,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_or_init_estimator_returns_none_for_non_parquet_format() {
+        let base_url = SampleTable::V9TxnsSimpleMeta.url_to_cow();
+        let table = Table::new_with_options(
+            base_url.path(),
+            [
+                (BaseFileFormat.as_ref(), BaseFileFormatValue::HFile.as_ref()),
+                (HudiInternalConfig::SkipConfigValidation.as_ref(), "true"),
+            ],
+        )
+        .await
+        .unwrap();
+        let latest_ts = table.timeline.get_latest_commit_timestamp().unwrap();
+        assert!(table.get_or_init_estimator(&latest_ts).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_or_init_estimator_retries_after_early_timestamp_without_sample() {
+        let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let table = Table::new(base_url.path()).await.unwrap();
+
+        // No completed commits at or before this timestamp, so no sample file can be found.
+        let early_ts = "19700101000000";
+        assert!(table.get_or_init_estimator(early_ts).await.is_none());
+
+        // A later request should still be able to initialize and cache the estimator.
+        let latest_ts = table.timeline.get_latest_commit_timestamp().unwrap();
+        let est_ptr = table.get_or_init_estimator(&latest_ts).await.unwrap() as *const _;
+        let cached_ptr = table.get_or_init_estimator(early_ts).await.unwrap() as *const _;
+        assert_eq!(est_ptr, cached_ptr);
+    }
+
+    #[tokio::test]
     async fn test_compute_table_stats_with_mdt() {
         use hudi_test::QuickstartTripsTable;
         let table_path = QuickstartTripsTable::V8Trips8I3U1D.path_to_mor_avro();
