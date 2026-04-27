@@ -69,7 +69,7 @@ impl FileGroupMerger for HashSet<FileGroup> {
 /// * `estimator` - Optional [FileStatsEstimator] used to populate `byte_size`
 ///   and `num_records` on each base file. When `None`, those fields stay at 0
 ///   while `size` is still populated from `HoodieWriteStat::file_size_in_bytes`.
-pub fn file_groups_from_commit_metadata<V: CompletionTimeView>(
+pub(crate) fn file_groups_from_commit_metadata<V: CompletionTimeView>(
     commit_metadata: &Map<String, Value>,
     completion_time_view: &V,
     estimator: Option<&FileStatsEstimator>,

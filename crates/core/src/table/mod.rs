@@ -1727,6 +1727,25 @@ mod tests {
             "de3550df-e12c-4591-9335-92ff992258a2-0"
         );
         assert!(file_slice_2.log_files.is_empty());
+
+        // FileMetadata is populated for incremental queries (issue #401).
+        // size comes from HoodieWriteStat.fileSizeInBytes; byte_size and num_records
+        // are estimated from the cached FileStatsEstimator (seeded from a sample
+        // base file in commit metadata at or before end_timestamp).
+        let m0 = file_slice_0.base_file.file_metadata.as_ref().unwrap();
+        assert_eq!(m0.size, 440878);
+        assert_eq!(m0.byte_size, 326703);
+        assert_eq!(m0.num_records, 458);
+
+        let m1 = file_slice_1.base_file.file_metadata.as_ref().unwrap();
+        assert_eq!(m1.size, 440616);
+        assert_eq!(m1.byte_size, 326509);
+        assert_eq!(m1.num_records, 458);
+
+        let m2 = file_slice_2.base_file.file_metadata.as_ref().unwrap();
+        assert_eq!(m2.size, 440638);
+        assert_eq!(m2.byte_size, 326525);
+        assert_eq!(m2.num_records, 458);
     }
 
     #[tokio::test]
