@@ -33,6 +33,7 @@ use crate::file_group::builder::replaced_file_groups_from_replace_commit;
 use crate::schema::resolver::{
     resolve_avro_schema_from_commit_metadata, resolve_data_schema_from_commit_metadata,
 };
+use crate::statistics::estimator::FileStatsEstimator;
 use crate::storage::Storage;
 use crate::timeline::builder::TimelineBuilder;
 use crate::timeline::instant::Action;
@@ -215,7 +216,10 @@ impl Timeline {
         Ok(clustering_instants)
     }
 
-    async fn get_instant_metadata(&self, instant: &Instant) -> Result<Map<String, Value>> {
+    pub(crate) async fn get_instant_metadata(
+        &self,
+        instant: &Instant,
+    ) -> Result<Map<String, Value>> {
         self.active_loader.load_instant_metadata(instant).await
     }
 
@@ -280,6 +284,21 @@ impl Timeline {
         resolve_data_schema_from_commit_metadata(&commit_metadata, self.storage.clone()).await
     }
 
+    /// Get all completed instants (commit/deltacommit/replacecommit) whose
+    /// request timestamp is ≤ `timestamp`, sorted ascending by timestamp.
+    pub(crate) fn get_completed_instants_at_or_before(
+        &self,
+        timestamp: &str,
+    ) -> Result<Vec<Instant>> {
+        let selector = TimelineSelector::completed_actions_in_range(
+            DEFAULT_LOADING_ACTIONS,
+            self.hudi_configs.clone(),
+            None,
+            Some(timestamp),
+        )?;
+        selector.select(self)
+    }
+
     pub(crate) async fn get_replaced_file_groups_as_of(
         &self,
         timestamp: &str,
@@ -315,9 +334,10 @@ impl Timeline {
         &self,
         start_timestamp: Option<&str>,
         end_timestamp: Option<&str>,
+        estimator: Option<&FileStatsEstimator>,
     ) -> Result<HashSet<FileGroup>> {
         use crate::file_group::builder::{
-            FileGroupMerger, file_groups_from_commit_metadata,
+            FileGroupMerger, file_groups_from_commit_metadata_with_estimator,
             replaced_file_groups_from_replace_commit,
         };
 
@@ -347,9 +367,10 @@ impl Timeline {
 
         for commit in commits {
             let commit_metadata = self.get_instant_metadata(&commit).await?;
-            file_groups.merge(file_groups_from_commit_metadata(
+            file_groups.merge(file_groups_from_commit_metadata_with_estimator(
                 &commit_metadata,
                 &completion_time_view,
+                estimator,
             )?)?;
 
             if commit.is_replacecommit() {

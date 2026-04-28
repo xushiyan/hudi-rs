@@ -237,6 +237,7 @@ impl Table {
         let file_pruner = FilePruner::empty();
         let table_schema = Schema::empty();
 
+        // MDT itself uses HFile base files; no estimator applies here.
         let file_slices = self
             .file_system_view
             .get_file_slices_by_storage_listing(
@@ -244,6 +245,7 @@ impl Table {
                 &file_pruner,
                 &table_schema,
                 &timeline_view,
+                None,
             )
             .await?;
 

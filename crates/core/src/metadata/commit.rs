@@ -220,6 +220,38 @@ impl HoodieCommitMetadata {
             })
     }
 
+    /// Iterate over relative base-file paths recorded in the commit's write stats.
+    ///
+    /// Uses dedicated fields from `HoodieWriteStat`:
+    /// - MOR writes use `baseFile` (joined with partition path)
+    /// - COW writes use `path`
+    ///
+    /// Empty values are ignored. For write stats that only carry log-file entries
+    /// (`logFiles` present but no `baseFile`), no base-file path is emitted.
+    pub fn iter_base_file_paths(&self) -> impl Iterator<Item = String> + '_ {
+        self.iter_write_stats().filter_map(|(partition, stat)| {
+            if let Some(base_file) = stat.base_file.as_deref().filter(|s| !s.is_empty()) {
+                if partition.is_empty() {
+                    Some(base_file.to_string())
+                } else {
+                    Some(format!("{partition}/{base_file}"))
+                }
+            } else {
+                // MOR log-only write stats may have `path` set to a log-file path.
+                // Those entries are identifiable by `logFiles` being present while
+                // `baseFile` is absent, and should not contribute base-file samples.
+                if stat.log_files.is_some() {
+                    None
+                } else {
+                    stat.path
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                }
+            }
+        })
+    }
+
     /// Iterate over all replace file IDs across all partitions
     pub fn iter_replace_file_ids(&self) -> impl Iterator<Item = (&String, &String)> {
         self.partition_to_replace_file_ids
@@ -658,5 +690,110 @@ mod tests {
         let metadata: HoodieCommitMetadata = serde_json::from_value(json).unwrap();
         let count = metadata.iter_replace_file_ids().count();
         assert_eq!(count, 3); // 1 from p1, 2 from p2
+    }
+
+    #[test]
+    fn test_iter_base_file_paths_mor_and_cow() {
+        let json = json!({
+            "partitionToWriteStats": {
+                "p1": [{
+                    "fileId": "fid-0",
+                    "baseFile": "fid-0_0-7-24_20240418173200000.parquet"
+                }],
+                "": [{
+                    "fileId": "fid-1",
+                    "path": "fid-1_0-7-24_20240418173200001.parquet"
+                }]
+            }
+        });
+        let metadata: HoodieCommitMetadata = serde_json::from_value(json).unwrap();
+        let mut paths: Vec<String> = metadata.iter_base_file_paths().collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "fid-1_0-7-24_20240418173200001.parquet".to_string(),
+                "p1/fid-0_0-7-24_20240418173200000.parquet".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_iter_base_file_paths_filters_log_files_and_invalid_paths() {
+        // MOR log-only write stats (`logFiles` present, no `baseFile`) should
+        // not emit a base-file path.
+        let json = json!({
+            "partitionToWriteStats": {
+                "p1": [{
+                    "fileId": "fid-0",
+                    "path": "p1/.fid-0_20240418173200000.log.1_0-1-2",
+                    "logFiles": [".fid-0_20240418173200000.log.1_0-1-2"]
+                }],
+                "p2": [{
+                    "fileId": "fid-1",
+                    "path": "p2/fid-1_0-7-24_20240418173200000.parquet"
+                }],
+                "p3": [{
+                    "fileId": "fid-2",
+                    "baseFile": ""
+                }],
+                "p4": [{
+                    "fileId": "fid-3",
+                    "baseFile": "fid-3_0-7-24_20240418173200000.parquet"
+                }]
+            }
+        });
+        let metadata: HoodieCommitMetadata = serde_json::from_value(json).unwrap();
+        let mut paths: Vec<String> = metadata.iter_base_file_paths().collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "p2/fid-1_0-7-24_20240418173200000.parquet".to_string(),
+                "p4/fid-3_0-7-24_20240418173200000.parquet".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_iter_base_file_paths_from_real_commit_fixtures() {
+        // Smoke test against real `.commit` / `.deltacommit` fixtures: verifies the
+        // COW `path` and MOR `baseFile` resolution (and the log-only filter) keep
+        // working when fed actual on-disk metadata, not just hand-rolled JSON.
+        let cow_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/timeline/commits_load_schema_from_base_file_cow/.hoodie/20250628002223107.commit"
+        );
+        let cow_metadata = HoodieCommitMetadata::from_json_bytes(
+            &std::fs::read(cow_path).expect("Failed to read COW fixture"),
+        )
+        .expect("Failed to parse sample COW commit metadata");
+        let mut cow_paths: Vec<String> = cow_metadata.iter_base_file_paths().collect();
+        cow_paths.sort();
+        assert_eq!(
+            cow_paths,
+            vec![
+                "city=chennai/03ffd613-fb74-456e-b6bb-115355d9b0ed-0_2-13-37_20250628002223107.parquet".to_string(),
+                "city=san_francisco/b271b5f8-29df-463d-ba4d-feedbe6e09ed-0_0-13-35_20250628002223107.parquet".to_string(),
+                "city=sao_paulo/a3c5da68-55a5-4804-ab8b-57e75252c69f-0_1-13-36_20250628002223107.parquet".to_string(),
+            ]
+        );
+
+        let mor_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/timeline/commits_load_schema_from_base_file_mor/.hoodie/20250331030645735.deltacommit"
+        );
+        let mor_metadata = HoodieCommitMetadata::from_json_bytes(
+            &std::fs::read(mor_path).expect("Failed to read MOR fixture"),
+        )
+        .expect("Failed to parse sample MOR deltacommit metadata");
+        let mor_paths: Vec<String> = mor_metadata.iter_base_file_paths().collect();
+        assert_eq!(
+            mor_paths,
+            vec![
+                "city=san_francisco/d0304c53-6fd2-4b7a-a9d6-5ff632f79224-0_0-13-60_20250331030642808.parquet"
+                    .to_string()
+            ]
+        );
     }
 }

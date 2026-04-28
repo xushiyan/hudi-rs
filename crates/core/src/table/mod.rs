@@ -101,16 +101,18 @@ use crate::Result;
 use crate::config::HudiConfigs;
 use crate::config::read::HudiReadConfig;
 use crate::config::table::HudiTableConfig::PartitionFields;
-use crate::config::table::{HudiTableConfig, TableTypeValue};
+use crate::config::table::{BaseFileFormatValue, HudiTableConfig, TableTypeValue};
 use crate::expr::filter::{Filter, from_str_tuples};
 use crate::file_group::file_slice::FileSlice;
 use crate::file_group::reader::FileGroupReader;
 use crate::keygen::is_timestamp_based_keygen;
 use crate::metadata::METADATA_TABLE_PARTITION_FIELD;
+use crate::metadata::commit::HoodieCommitMetadata;
 use crate::metadata::meta_field::MetaField;
 use crate::schema::resolver::{
     resolve_avro_schema, resolve_avro_schema_with_meta_fields, resolve_data_schema, resolve_schema,
 };
+use crate::statistics::estimator::FileStatsEstimator;
 use crate::table::builder::TableBuilder;
 use crate::table::file_pruner::FilePruner;
 use crate::table::fs_view::FileSystemView;
@@ -136,6 +138,10 @@ pub struct Table {
     /// Only populated when metadata table is enabled (v8+ with files partition).
     /// Shared across clones via `Arc` so all scan() calls reuse the same instance.
     cached_metadata_table: Arc<OnceCell<Table>>,
+    /// Cached file stats estimator. Materialized on first successful call to
+    /// [`Table::get_or_init_estimator`]. Failed or inapplicable attempts do not
+    /// populate the cache, allowing later calls with newer timestamps to retry.
+    cached_estimator: Arc<OnceCell<FileStatsEstimator>>,
 }
 
 impl Clone for Table {
@@ -146,6 +152,7 @@ impl Clone for Table {
             timeline: self.timeline.clone(),
             file_system_view: self.file_system_view.clone(),
             cached_metadata_table: self.cached_metadata_table.clone(),
+            cached_estimator: self.cached_estimator.clone(),
         }
     }
 }
@@ -162,6 +169,91 @@ impl Table {
                 self.new_metadata_table().await
             })
             .await
+    }
+
+    /// Get or initialize the cached `FileStatsEstimator` for this **data table**.
+    ///
+    /// This is the single point where eligibility for footer-based stats
+    /// estimation is validated. Returns `None` when:
+    /// - The base file format is not Parquet (e.g., HFile metadata tables).
+    /// - No sample base-file path can be derived from commit metadata at or
+    ///   before `sample_at_timestamp`.
+    /// - The parquet footer read fails for the sample path.
+    ///
+    /// The cache is only materialized on successful initialization. This avoids
+    /// pinning a "no sample yet" state from an early timestamp.
+    ///
+    /// Not intended for use on metadata tables. MDTs use HFile, which already
+    /// short-circuits via the format check below; this is documented for the
+    /// reader, not enforced via a separate flag.
+    pub(crate) async fn get_or_init_estimator(
+        &self,
+        sample_at_timestamp: &str,
+    ) -> Option<&FileStatsEstimator> {
+        if let Some(estimator) = self.cached_estimator.get() {
+            return Some(estimator);
+        }
+
+        // SINGLE point of parquet validation for the estimator concern.
+        if !matches!(
+            self.file_system_view.base_file_format(),
+            BaseFileFormatValue::Parquet
+        ) {
+            return None;
+        }
+
+        let path = self
+            .sample_base_file_path_at_or_before(sample_at_timestamp)
+            .await?;
+
+        self.cached_estimator
+            .get_or_try_init(|| async {
+                FileStatsEstimator::from_parquet_footer(&self.file_system_view.storage, &path).await
+            })
+            .await
+            .map(Some)
+            .unwrap_or_else(|e| {
+                log::warn!(
+                    "Failed to initialize file stats estimator from sample base file '{path}' \
+                     (as-of timestamp: '{sample_at_timestamp}'): {e}"
+                );
+                None
+            })
+    }
+
+    /// Sample one base file path active at or before the given timestamp.
+    ///
+    /// Walks completed commits ≤ `timestamp` in reverse (latest-first) and
+    /// returns the first recorded base-file path. This handles MOR tables
+    /// whose latest commit may be a delta commit with only log files —
+    /// in that case we fall back to earlier commits that wrote base files.
+    ///
+    /// Format-agnostic by design: callers that require a specific format
+    /// must validate before invoking. Returns `None` if no commit in range
+    /// has a recorded base-file path.
+    pub(crate) async fn sample_base_file_path_at_or_before(
+        &self,
+        timestamp: &str,
+    ) -> Option<String> {
+        let commits = self
+            .timeline
+            .get_completed_instants_at_or_before(timestamp)
+            .ok()?;
+        for commit in commits.iter().rev() {
+            let Ok(metadata) = self.timeline.get_instant_metadata(commit).await else {
+                continue;
+            };
+            let Ok(parsed) = HoodieCommitMetadata::from_json_map(&metadata) else {
+                continue;
+            };
+            // Pick a stable sample path so estimator-derived stats are reproducible.
+            // `partition_to_write_stats` is a HashMap, so raw iteration order is
+            // non-deterministic across process runs.
+            if let Some(path) = parsed.iter_base_file_paths().min() {
+                return Some(path);
+            }
+        }
+        None
     }
 
     /// Create hudi table by base_uri
@@ -454,6 +546,10 @@ impl Table {
             None
         };
 
+        // Estimator-backed metadata enrichment is used by both MDT-backed loading
+        // and fallback storage listing.
+        let estimator = self.get_or_init_estimator(timestamp).await;
+
         self.file_system_view
             .get_file_slices(
                 &partition_pruner,
@@ -461,6 +557,7 @@ impl Table {
                 &table_schema,
                 &timeline_view,
                 metadata_table,
+                estimator,
             )
             .await
     }
@@ -540,11 +637,17 @@ impl Table {
         start_timestamp: &str,
         end_timestamp: &str,
     ) -> Result<Vec<FileSlice>> {
-        let mut file_slices: Vec<FileSlice> = Vec::new();
+        // Seed the cached estimator from a sample base file at or before
+        // end_timestamp so the file group builder can populate FileMetadata
+        // (size, byte_size, num_records) on each base file.
+        let estimator = self.get_or_init_estimator(end_timestamp).await;
+
         let file_groups = self
             .timeline
-            .get_file_groups_between(Some(start_timestamp), Some(end_timestamp))
+            .get_file_groups_between(Some(start_timestamp), Some(end_timestamp), estimator)
             .await?;
+
+        let mut file_slices: Vec<FileSlice> = Vec::new();
         for file_group in file_groups {
             if let Some(file_slice) = file_group.get_file_slice_as_of(end_timestamp) {
                 file_slices.push(file_slice.clone());
@@ -873,19 +976,15 @@ impl Table {
             .filter(|(name, _)| name.ends_with(&base_file_suffix))
             .map(|(_, size)| size)
             .sum::<u64>();
-        let sample_file_path =
-            FileSystemView::find_sample_base_file_path_from_records(&records, &base_file_format);
 
         if total_on_disk_size == 0 {
             return None;
         }
 
-        // Step 2: Use the cached estimator (or init it now).
-        // Return None if no sample file is found or estimator fails to initialize.
-        let estimator = self
-            .file_system_view
-            .get_or_init_estimator(&base_file_format, sample_file_path.as_deref())
-            .await?;
+        // Step 2: Use the cached estimator (seeded from the latest commit's sample).
+        // Return None if estimator is not available (non-Parquet, no sample, or read failed).
+        let latest_ts = self.timeline.get_latest_commit_timestamp().ok()?;
+        let estimator = self.get_or_init_estimator(&latest_ts).await?;
         let (estimated_total_byte_size, estimated_total_rows) =
             estimator.estimate(total_on_disk_size);
         // Estimator math is non-negative by construction (u64 size * f64 ratio).
@@ -1646,6 +1745,25 @@ mod tests {
             "de3550df-e12c-4591-9335-92ff992258a2-0"
         );
         assert!(file_slice_2.log_files.is_empty());
+
+        // FileMetadata is populated for incremental queries (issue #401).
+        // size comes from HoodieWriteStat.fileSizeInBytes; byte_size and num_records
+        // are estimated from the cached FileStatsEstimator (seeded from a sample
+        // base file in commit metadata at or before end_timestamp).
+        let m0 = file_slice_0.base_file.file_metadata.as_ref().unwrap();
+        assert_eq!(m0.size, 440878);
+        assert_eq!(m0.byte_size, 326703);
+        assert_eq!(m0.num_records, 458);
+
+        let m1 = file_slice_1.base_file.file_metadata.as_ref().unwrap();
+        assert_eq!(m1.size, 440616);
+        assert_eq!(m1.byte_size, 326509);
+        assert_eq!(m1.num_records, 458);
+
+        let m2 = file_slice_2.base_file.file_metadata.as_ref().unwrap();
+        assert_eq!(m2.size, 440638);
+        assert_eq!(m2.byte_size, 326525);
+        assert_eq!(m2.num_records, 458);
     }
 
     #[tokio::test]
@@ -1798,6 +1916,39 @@ mod tests {
             .collect::<HashSet<_>>();
         let expected = HashSet::new();
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn test_get_or_init_estimator_returns_none_for_non_parquet_format() {
+        let base_url = SampleTable::V9TxnsSimpleMeta.url_to_cow();
+        let table = Table::new_with_options(
+            base_url.path(),
+            [
+                (BaseFileFormat.as_ref(), BaseFileFormatValue::HFile.as_ref()),
+                (HudiInternalConfig::SkipConfigValidation.as_ref(), "true"),
+            ],
+        )
+        .await
+        .unwrap();
+        let latest_ts = table.timeline.get_latest_commit_timestamp().unwrap();
+        assert!(table.get_or_init_estimator(&latest_ts).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_or_init_estimator_retries_after_early_timestamp_without_sample() {
+        let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
+        let table = Table::new(base_url.path()).await.unwrap();
+
+        // No completed commits at or before this timestamp, so no sample file can be found.
+        let early_ts = "19700101000000";
+        assert!(table.get_or_init_estimator(early_ts).await.is_none());
+
+        // A later request should still be able to initialize and cache the estimator,
+        // and the subsequent early-timestamp call must hit the same cached instance.
+        let latest_ts = table.timeline.get_latest_commit_timestamp().unwrap();
+        let initialized = table.get_or_init_estimator(&latest_ts).await.unwrap();
+        let cached = table.get_or_init_estimator(early_ts).await.unwrap();
+        assert!(std::ptr::eq(initialized, cached));
     }
 
     #[tokio::test]

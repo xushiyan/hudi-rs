@@ -25,6 +25,7 @@ use crate::file_group::FileGroup;
 use crate::file_group::base_file::BaseFile;
 use crate::file_group::log_file::LogFile;
 use crate::metadata::LAKE_FORMAT_METADATA_DIRS;
+use crate::statistics::estimator::FileStatsEstimator;
 use crate::storage::{Storage, get_leaf_dirs};
 use crate::table::partition::{
     EMPTY_PARTITION_PATH, PARTITION_METAFIELD_PREFIX, PartitionPruner, is_table_partitioned,
@@ -72,6 +73,7 @@ impl FileLister {
         &self,
         partition_path: &str,
         completion_time_view: &V,
+        estimator: Option<&FileStatsEstimator>,
     ) -> Result<Vec<FileGroup>> {
         let base_file_format: String = self.hudi_configs.get_or_default(BaseFileFormat).into();
 
@@ -98,6 +100,17 @@ impl FileLister {
                 {
                     // file belongs to an uncommitted commit, skip it
                     continue;
+                }
+                if let Some(metadata) = base_file.file_metadata.as_mut() {
+                    // Populate estimated stats for storage-listing paths so
+                    // snapshot/time-travel metadata matches MDT-backed paths.
+                    if metadata.size > 0 {
+                        let (byte_size, num_records) = estimator
+                            .map(|e| e.estimate(metadata.size))
+                            .unwrap_or((0, 0));
+                        metadata.byte_size = byte_size;
+                        metadata.num_records = num_records;
+                    }
                 }
 
                 let file_id = &base_file.file_id;
@@ -185,10 +198,15 @@ impl FileLister {
     pub async fn list_file_groups_for_relevant_partitions<V: CompletionTimeView + Sync>(
         &self,
         completion_time_view: &V,
+        estimator: Option<&FileStatsEstimator>,
     ) -> Result<DashMap<String, Vec<FileGroup>>> {
         if !is_table_partitioned(&self.hudi_configs) {
             let file_groups = self
-                .list_file_groups_for_partition(EMPTY_PARTITION_PATH, completion_time_view)
+                .list_file_groups_for_partition(
+                    EMPTY_PARTITION_PATH,
+                    completion_time_view,
+                    estimator,
+                )
                 .await?;
             let file_groups_map = DashMap::with_capacity(1);
             file_groups_map.insert(EMPTY_PARTITION_PATH.to_string(), file_groups);
@@ -201,7 +219,7 @@ impl FileLister {
         stream::iter(pruned_partition_paths)
             .map(|p| async move {
                 let file_groups = self
-                    .list_file_groups_for_partition(&p, completion_time_view)
+                    .list_file_groups_for_partition(&p, completion_time_view, estimator)
                     .await?;
                 Ok::<_, CoreError>((p, file_groups))
             })

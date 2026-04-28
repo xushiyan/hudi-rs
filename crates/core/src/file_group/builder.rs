@@ -70,6 +70,22 @@ pub fn file_groups_from_commit_metadata<V: CompletionTimeView>(
     commit_metadata: &Map<String, Value>,
     completion_time_view: &V,
 ) -> Result<HashSet<FileGroup>> {
+    file_groups_from_commit_metadata_with_estimator(commit_metadata, completion_time_view, None)
+}
+
+/// # Arguments
+///
+/// * `commit_metadata` - The commit metadata JSON map
+/// * `completion_time_view` - View to look up completion timestamps.
+/// * `estimator` - Optional [FileStatsEstimator] used to populate `byte_size`
+///   and `num_records` on each base file. When `None`, those fields stay at 0.
+///   `size` is populated from `HoodieWriteStat::file_size_in_bytes` only when
+///   the write stat path identifies the base file.
+pub(crate) fn file_groups_from_commit_metadata_with_estimator<V: CompletionTimeView>(
+    commit_metadata: &Map<String, Value>,
+    completion_time_view: &V,
+    estimator: Option<&FileStatsEstimator>,
+) -> Result<HashSet<FileGroup>> {
     let metadata = HoodieCommitMetadata::from_json_map(commit_metadata)?;
 
     let mut file_groups = HashSet::new();
@@ -82,18 +98,54 @@ pub fn file_groups_from_commit_metadata<V: CompletionTimeView>(
 
         let mut file_group = FileGroup::new(file_id.clone(), partition.clone());
 
-        // Handle two cases:
-        // 1. MOR table with baseFile and optionally logFiles
-        // 2. COW table with path only
-        if let Some(base_file_name) = &write_stat.base_file {
-            let mut base_file = BaseFile::from_str(base_file_name)?;
-            base_file.set_completion_time(completion_time_view);
-            file_group.add_base_file(base_file)?;
+        // Resolve the base file name: MOR write stats record `baseFile`; COW write
+        // stats record `path` (`<partition>/<file>`). Either way, derive the file
+        // name string used to construct the BaseFile.
+        let base_file_name: String = if let Some(name) = &write_stat.base_file {
+            name.clone()
+        } else {
+            let path = write_stat
+                .path
+                .as_ref()
+                .ok_or_else(|| CoreError::CommitMetadata("Missing path in write stats".into()))?;
+            Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| CoreError::CommitMetadata("Invalid file name in path".into()))?
+                .to_string()
+        };
 
-            // Log files are optional - MOR tables may have:
-            // - No log files yet (initial insert)
-            // - Some log files (after updates)
-            // - Empty log files list
+        let mut base_file = BaseFile::from_str(&base_file_name)?;
+        base_file.set_completion_time(completion_time_view);
+
+        let path_file_name = write_stat
+            .path
+            .as_deref()
+            .and_then(|path| Path::new(path).file_name())
+            .and_then(|name| name.to_str());
+        let write_stat_size_is_for_base_file = path_file_name == Some(base_file_name.as_str());
+
+        // Populate FileMetadata only when the write-stat size belongs to the base
+        // file. MOR delta commits can have `baseFile` set while `path` and
+        // `fileSizeInBytes` describe a newly written log file.
+        if let Some(file_size) = write_stat
+            .file_size_in_bytes
+            .filter(|s| write_stat_size_is_for_base_file && *s > 0)
+        {
+            let size = file_size as u64;
+            let (byte_size, num_records) = estimator.map(|e| e.estimate(size)).unwrap_or((0, 0));
+            base_file.file_metadata = Some(FileMetadata {
+                name: base_file_name,
+                size,
+                byte_size,
+                num_records,
+            });
+        }
+
+        file_group.add_base_file(base_file)?;
+
+        // Log files are only present in MOR write stats (the `baseFile` branch).
+        if write_stat.base_file.is_some() {
             if let Some(log_file_names) = &write_stat.log_files {
                 for log_file_name in log_file_names {
                     let mut log_file = LogFile::from_str(log_file_name)?;
@@ -101,21 +153,6 @@ pub fn file_groups_from_commit_metadata<V: CompletionTimeView>(
                     file_group.add_log_file(log_file)?;
                 }
             }
-            // Note: log_files being None is valid for MOR tables
-        } else {
-            let path = write_stat
-                .path
-                .as_ref()
-                .ok_or_else(|| CoreError::CommitMetadata("Missing path in write stats".into()))?;
-
-            let file_name = Path::new(path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| CoreError::CommitMetadata("Invalid file name in path".into()))?;
-
-            let mut base_file = BaseFile::from_str(file_name)?;
-            base_file.set_completion_time(completion_time_view);
-            file_group.add_base_file(base_file)?;
         }
 
         file_groups.insert(file_group);
@@ -415,47 +452,36 @@ mod tests {
         }
 
         #[test]
-        fn test_non_string_file_id() {
-            let metadata: Map<String, Value> = json!({
-                "partitionToWriteStats": {
-                    "byteField=20/shortField=100": [{
-                        "fileId": 123, // number instead of string
-                        "path": "byteField=20/shortField=100/some-file.parquet"
-                    }]
-                }
-            })
-            .as_object()
-            .unwrap()
-            .clone();
+        fn test_non_string_field_types_fail_to_parse() {
+            // Non-string `fileId` or `path` should both surface as a serde
+            // deserialization error from HoodieCommitMetadata::from_json_map.
+            let cases = [
+                json!({
+                    "partitionToWriteStats": {
+                        "byteField=20/shortField=100": [{
+                            "fileId": 123,
+                            "path": "byteField=20/shortField=100/some-file.parquet"
+                        }]
+                    }
+                }),
+                json!({
+                    "partitionToWriteStats": {
+                        "byteField=20/shortField=100": [{
+                            "fileId": "bb7c3a45-387f-490d-aab2-981c3f1a8ada-0",
+                            "path": 123
+                        }]
+                    }
+                }),
+            ];
 
-            let result = file_groups_from_commit_metadata(&metadata, &create_layout_v1_view());
-            // Serde will fail to parse this and return a deserialization error
-            assert!(matches!(
-                result,
-                Err(CoreError::CommitMetadata(msg)) if msg.contains("Failed to parse commit metadata")
-            ));
-        }
-
-        #[test]
-        fn test_non_string_path() {
-            let metadata: Map<String, Value> = json!({
-                "partitionToWriteStats": {
-                    "byteField=20/shortField=100": [{
-                        "fileId": "bb7c3a45-387f-490d-aab2-981c3f1a8ada-0",
-                        "path": 123 // number instead of string
-                    }]
-                }
-            })
-            .as_object()
-            .unwrap()
-            .clone();
-
-            let result = file_groups_from_commit_metadata(&metadata, &create_layout_v1_view());
-            // Serde will fail to parse this and return a deserialization error
-            assert!(matches!(
-                result,
-                Err(CoreError::CommitMetadata(msg)) if msg.contains("Failed to parse commit metadata")
-            ));
+            for value in cases {
+                let metadata: Map<String, Value> = value.as_object().unwrap().clone();
+                let result = file_groups_from_commit_metadata(&metadata, &create_layout_v1_view());
+                assert!(matches!(
+                    result,
+                    Err(CoreError::CommitMetadata(msg)) if msg.contains("Failed to parse commit metadata")
+                ));
+            }
         }
 
         #[test]
@@ -524,50 +550,44 @@ mod tests {
         }
 
         #[test]
-        fn test_mor_table_base_file_no_log_files() {
-            // MOR table with base file but no log files (initial insert)
-            let sample_json = r#"{
-            "partitionToWriteStats": {
-                "partition1": [{
-                    "fileId": "file-id-0",
-                    "baseFile": "file-id-0_0-7-24_20240418173200000.parquet"
-                }]
+        fn test_mor_table_base_file_without_log_files() {
+            // Both `logFiles` absent (initial insert) and `logFiles: []` (empty array)
+            // should yield a file slice with no log files.
+            let cases = [
+                r#"{
+                    "partitionToWriteStats": {
+                        "partition1": [{
+                            "fileId": "file-id-0",
+                            "baseFile": "file-id-0_0-7-24_20240418173200000.parquet"
+                        }]
+                    }
+                }"#,
+                r#"{
+                    "partitionToWriteStats": {
+                        "partition1": [{
+                            "fileId": "file-id-0",
+                            "baseFile": "file-id-0_0-7-24_20240418173200000.parquet",
+                            "logFiles": []
+                        }]
+                    }
+                }"#,
+            ];
+
+            for sample_json in cases {
+                let metadata: Map<String, Value> = serde_json::from_str(sample_json).unwrap();
+                let file_groups =
+                    file_groups_from_commit_metadata(&metadata, &create_layout_v1_view()).unwrap();
+                assert_eq!(file_groups.len(), 1);
+                let (_, file_slice) = file_groups
+                    .iter()
+                    .next()
+                    .unwrap()
+                    .file_slices
+                    .iter()
+                    .next()
+                    .unwrap();
+                assert!(file_slice.log_files.is_empty());
             }
-        }"#;
-
-            let metadata: Map<String, Value> = serde_json::from_str(sample_json).unwrap();
-            let result = file_groups_from_commit_metadata(&metadata, &create_layout_v1_view());
-            assert!(result.is_ok());
-            let file_groups = result.unwrap();
-            assert_eq!(file_groups.len(), 1);
-
-            let file_group = file_groups.iter().next().unwrap();
-            let (_, file_slice) = file_group.file_slices.iter().next().unwrap();
-            assert!(file_slice.log_files.is_empty());
-        }
-
-        #[test]
-        fn test_mor_table_base_file_empty_log_files() {
-            // MOR table with base file and empty log files array
-            let sample_json = r#"{
-            "partitionToWriteStats": {
-                "partition1": [{
-                    "fileId": "file-id-0",
-                    "baseFile": "file-id-0_0-7-24_20240418173200000.parquet",
-                    "logFiles": []
-                }]
-            }
-        }"#;
-
-            let metadata: Map<String, Value> = serde_json::from_str(sample_json).unwrap();
-            let result = file_groups_from_commit_metadata(&metadata, &create_layout_v1_view());
-            assert!(result.is_ok());
-            let file_groups = result.unwrap();
-            assert_eq!(file_groups.len(), 1);
-
-            let file_group = file_groups.iter().next().unwrap();
-            let (_, file_slice) = file_group.file_slices.iter().next().unwrap();
-            assert!(file_slice.log_files.is_empty());
         }
 
         #[test]
@@ -604,6 +624,139 @@ mod tests {
                 file_slice.base_file.completion_timestamp,
                 Some("20240418173210000".to_string())
             );
+        }
+
+        #[test]
+        fn test_public_api_uses_no_estimator_for_cow_path_metadata() {
+            let json = r#"{
+                "partitionToWriteStats": {
+                    "p1": [{
+                        "fileId": "fid-0",
+                        "path": "p1/fid-0_0-7-24_20240418173200000.parquet",
+                        "fileSizeInBytes": 4096
+                    }]
+                }
+            }"#;
+            let metadata: Map<String, Value> = serde_json::from_str(json).unwrap();
+
+            let groups =
+                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view()).unwrap();
+            let file_slice = groups
+                .iter()
+                .next()
+                .unwrap()
+                .file_slices
+                .values()
+                .next()
+                .unwrap();
+            assert!(file_slice.log_files.is_empty());
+            let m = file_slice.base_file.file_metadata.as_ref().unwrap();
+            assert_eq!(m.name, "fid-0_0-7-24_20240418173200000.parquet");
+            assert_eq!(m.size, 4096);
+            assert_eq!(m.byte_size, 0);
+            assert_eq!(m.num_records, 0);
+        }
+
+        #[test]
+        fn test_metadata_populated_from_write_stat_size_with_estimator() {
+            // No-estimator coverage lives in test_public_api_uses_no_estimator_for_cow_path_metadata.
+            // This test focuses on estimator-derived byte_size / num_records for the MOR
+            // baseFile path.
+            let json = r#"{
+                "partitionToWriteStats": {
+                    "p1": [{
+                        "fileId": "fid-0",
+                        "baseFile": "fid-0_0-7-24_20240418173200000.parquet",
+                        "path": "p1/fid-0_0-7-24_20240418173200000.parquet",
+                        "fileSizeInBytes": 4096
+                    }]
+                }
+            }"#;
+            let metadata: Map<String, Value> = serde_json::from_str(json).unwrap();
+
+            let estimator = FileStatsEstimator::new(100.0, 2.5);
+            let groups = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                Some(&estimator),
+            )
+            .unwrap();
+            let m = groups
+                .iter()
+                .next()
+                .unwrap()
+                .file_slices
+                .values()
+                .next()
+                .unwrap()
+                .base_file
+                .file_metadata
+                .as_ref()
+                .unwrap();
+            assert_eq!(m.size, 4096);
+            assert_eq!(m.byte_size, 10240); // 4096 * 2.5
+            assert_eq!(m.num_records, 40); // 4096 / 100
+        }
+
+        #[test]
+        fn test_mor_log_write_stat_does_not_assign_log_size_to_base_file() {
+            let json = r#"{
+                "partitionToWriteStats": {
+                    "p1": [{
+                        "fileId": "fid-0",
+                        "baseFile": "fid-0_0-7-24_20240418173200000.parquet",
+                        "path": "p1/.fid-0_20240418173200000.log.1_0-8-25",
+                        "fileSizeInBytes": 1148,
+                        "logFiles": [
+                            ".fid-0_20240418173200000.log.1_0-8-25"
+                        ]
+                    }]
+                }
+            }"#;
+            let metadata: Map<String, Value> = serde_json::from_str(json).unwrap();
+            let estimator = FileStatsEstimator::new(100.0, 2.5);
+
+            let groups = file_groups_from_commit_metadata_with_estimator(
+                &metadata,
+                &create_layout_v1_view(),
+                Some(&estimator),
+            )
+            .unwrap();
+            let file_slice = groups
+                .iter()
+                .next()
+                .unwrap()
+                .file_slices
+                .values()
+                .next()
+                .unwrap();
+
+            assert_eq!(file_slice.log_files.len(), 1);
+            assert!(file_slice.base_file.file_metadata.is_none());
+        }
+
+        #[test]
+        fn test_metadata_absent_when_no_file_size() {
+            let json = r#"{
+                "partitionToWriteStats": {
+                    "p1": [{
+                        "fileId": "fid-0",
+                        "baseFile": "fid-0_0-7-24_20240418173200000.parquet"
+                    }]
+                }
+            }"#;
+            let metadata: Map<String, Value> = serde_json::from_str(json).unwrap();
+            let groups =
+                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view()).unwrap();
+            let fs = groups
+                .iter()
+                .next()
+                .unwrap()
+                .file_slices
+                .values()
+                .next()
+                .unwrap();
+            assert!(fs.base_file.file_metadata.is_none());
         }
     }
 

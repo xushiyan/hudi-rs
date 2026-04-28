@@ -121,6 +121,7 @@ impl TableBuilder {
             timeline,
             file_system_view,
             cached_metadata_table: std::sync::Arc::new(tokio::sync::OnceCell::new()),
+            cached_estimator: std::sync::Arc::new(tokio::sync::OnceCell::new()),
         })
     }
 }
