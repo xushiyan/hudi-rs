@@ -756,40 +756,40 @@ mod tests {
     }
 
     #[test]
-    fn test_iter_base_file_paths_from_sample_cow_commit() {
-        let file_path = concat!(
+    fn test_iter_base_file_paths_from_real_commit_fixtures() {
+        // Smoke test against real `.commit` / `.deltacommit` fixtures: verifies the
+        // COW `path` and MOR `baseFile` resolution (and the log-only filter) keep
+        // working when fed actual on-disk metadata, not just hand-rolled JSON.
+        let cow_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/data/timeline/commits_load_schema_from_base_file_cow/.hoodie/20250628002223107.commit"
         );
-        let bytes = std::fs::read(file_path).expect("Failed to read test fixture");
-        let metadata = HoodieCommitMetadata::from_json_bytes(&bytes)
-            .expect("Failed to parse sample COW commit metadata");
-
-        let mut paths: Vec<String> = metadata.iter_base_file_paths().collect();
-        paths.sort();
+        let cow_metadata = HoodieCommitMetadata::from_json_bytes(
+            &std::fs::read(cow_path).expect("Failed to read COW fixture"),
+        )
+        .expect("Failed to parse sample COW commit metadata");
+        let mut cow_paths: Vec<String> = cow_metadata.iter_base_file_paths().collect();
+        cow_paths.sort();
         assert_eq!(
-            paths,
+            cow_paths,
             vec![
                 "city=chennai/03ffd613-fb74-456e-b6bb-115355d9b0ed-0_2-13-37_20250628002223107.parquet".to_string(),
                 "city=san_francisco/b271b5f8-29df-463d-ba4d-feedbe6e09ed-0_0-13-35_20250628002223107.parquet".to_string(),
                 "city=sao_paulo/a3c5da68-55a5-4804-ab8b-57e75252c69f-0_1-13-36_20250628002223107.parquet".to_string(),
             ]
         );
-    }
 
-    #[test]
-    fn test_iter_base_file_paths_from_sample_mor_deltacommit() {
-        let file_path = concat!(
+        let mor_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/data/timeline/commits_load_schema_from_base_file_mor/.hoodie/20250331030645735.deltacommit"
         );
-        let bytes = std::fs::read(file_path).expect("Failed to read test fixture");
-        let metadata = HoodieCommitMetadata::from_json_bytes(&bytes)
-            .expect("Failed to parse sample MOR deltacommit metadata");
-
-        let paths: Vec<String> = metadata.iter_base_file_paths().collect();
+        let mor_metadata = HoodieCommitMetadata::from_json_bytes(
+            &std::fs::read(mor_path).expect("Failed to read MOR fixture"),
+        )
+        .expect("Failed to parse sample MOR deltacommit metadata");
+        let mor_paths: Vec<String> = mor_metadata.iter_base_file_paths().collect();
         assert_eq!(
-            paths,
+            mor_paths,
             vec![
                 "city=san_francisco/d0304c53-6fd2-4b7a-a9d6-5ff632f79224-0_0-13-60_20250331030642808.parquet"
                     .to_string()

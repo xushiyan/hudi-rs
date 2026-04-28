@@ -1943,11 +1943,12 @@ mod tests {
         let early_ts = "19700101000000";
         assert!(table.get_or_init_estimator(early_ts).await.is_none());
 
-        // A later request should still be able to initialize and cache the estimator.
+        // A later request should still be able to initialize and cache the estimator,
+        // and the subsequent early-timestamp call must hit the same cached instance.
         let latest_ts = table.timeline.get_latest_commit_timestamp().unwrap();
-        let est_ptr = table.get_or_init_estimator(&latest_ts).await.unwrap() as *const _;
-        let cached_ptr = table.get_or_init_estimator(early_ts).await.unwrap() as *const _;
-        assert_eq!(est_ptr, cached_ptr);
+        let initialized = table.get_or_init_estimator(&latest_ts).await.unwrap();
+        let cached = table.get_or_init_estimator(early_ts).await.unwrap();
+        assert!(std::ptr::eq(initialized, cached));
     }
 
     #[tokio::test]

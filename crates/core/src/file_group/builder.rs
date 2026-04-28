@@ -365,11 +365,7 @@ mod tests {
             .clone();
 
             // Use layout v1 view (no completion time tracking)
-            let result = file_groups_from_commit_metadata_with_estimator(
-                &metadata,
-                &create_layout_v1_view(),
-                None,
-            );
+            let result = file_groups_from_commit_metadata(&metadata, &create_layout_v1_view());
             // With the new implementation, this returns Ok with an empty HashSet
             // because iter_write_stats() returns an empty iterator when partition_to_write_stats is None
             assert!(result.is_ok());
@@ -387,11 +383,7 @@ mod tests {
             .unwrap()
             .clone();
 
-            let result = file_groups_from_commit_metadata_with_estimator(
-                &metadata,
-                &create_layout_v1_view(),
-                None,
-            );
+            let result = file_groups_from_commit_metadata(&metadata, &create_layout_v1_view());
             assert!(matches!(
                 result,
                 Err(CoreError::CommitMetadata(msg)) if msg.contains("Failed to parse commit metadata")
@@ -411,11 +403,7 @@ mod tests {
             .unwrap()
             .clone();
 
-            let result = file_groups_from_commit_metadata_with_estimator(
-                &metadata,
-                &create_layout_v1_view(),
-                None,
-            );
+            let result = file_groups_from_commit_metadata(&metadata, &create_layout_v1_view());
             assert!(matches!(
                 result,
                 Err(CoreError::CommitMetadata(msg)) if msg == "Missing fileId in write stats"
@@ -435,11 +423,7 @@ mod tests {
             .unwrap()
             .clone();
 
-            let result = file_groups_from_commit_metadata_with_estimator(
-                &metadata,
-                &create_layout_v1_view(),
-                None,
-            );
+            let result = file_groups_from_commit_metadata(&metadata, &create_layout_v1_view());
             assert!(matches!(
                 result,
                 Err(CoreError::CommitMetadata(msg)) if msg == "Missing path in write stats"
@@ -460,11 +444,7 @@ mod tests {
             .unwrap()
             .clone();
 
-            let result = file_groups_from_commit_metadata_with_estimator(
-                &metadata,
-                &create_layout_v1_view(),
-                None,
-            );
+            let result = file_groups_from_commit_metadata(&metadata, &create_layout_v1_view());
             assert!(matches!(
                 result,
                 Err(CoreError::CommitMetadata(msg)) if msg == "Invalid file name in path"
@@ -472,55 +452,36 @@ mod tests {
         }
 
         #[test]
-        fn test_non_string_file_id() {
-            let metadata: Map<String, Value> = json!({
-                "partitionToWriteStats": {
-                    "byteField=20/shortField=100": [{
-                        "fileId": 123, // number instead of string
-                        "path": "byteField=20/shortField=100/some-file.parquet"
-                    }]
-                }
-            })
-            .as_object()
-            .unwrap()
-            .clone();
+        fn test_non_string_field_types_fail_to_parse() {
+            // Non-string `fileId` or `path` should both surface as a serde
+            // deserialization error from HoodieCommitMetadata::from_json_map.
+            let cases = [
+                json!({
+                    "partitionToWriteStats": {
+                        "byteField=20/shortField=100": [{
+                            "fileId": 123,
+                            "path": "byteField=20/shortField=100/some-file.parquet"
+                        }]
+                    }
+                }),
+                json!({
+                    "partitionToWriteStats": {
+                        "byteField=20/shortField=100": [{
+                            "fileId": "bb7c3a45-387f-490d-aab2-981c3f1a8ada-0",
+                            "path": 123
+                        }]
+                    }
+                }),
+            ];
 
-            let result = file_groups_from_commit_metadata_with_estimator(
-                &metadata,
-                &create_layout_v1_view(),
-                None,
-            );
-            // Serde will fail to parse this and return a deserialization error
-            assert!(matches!(
-                result,
-                Err(CoreError::CommitMetadata(msg)) if msg.contains("Failed to parse commit metadata")
-            ));
-        }
-
-        #[test]
-        fn test_non_string_path() {
-            let metadata: Map<String, Value> = json!({
-                "partitionToWriteStats": {
-                    "byteField=20/shortField=100": [{
-                        "fileId": "bb7c3a45-387f-490d-aab2-981c3f1a8ada-0",
-                        "path": 123 // number instead of string
-                    }]
-                }
-            })
-            .as_object()
-            .unwrap()
-            .clone();
-
-            let result = file_groups_from_commit_metadata_with_estimator(
-                &metadata,
-                &create_layout_v1_view(),
-                None,
-            );
-            // Serde will fail to parse this and return a deserialization error
-            assert!(matches!(
-                result,
-                Err(CoreError::CommitMetadata(msg)) if msg.contains("Failed to parse commit metadata")
-            ));
+            for value in cases {
+                let metadata: Map<String, Value> = value.as_object().unwrap().clone();
+                let result = file_groups_from_commit_metadata(&metadata, &create_layout_v1_view());
+                assert!(matches!(
+                    result,
+                    Err(CoreError::CommitMetadata(msg)) if msg.contains("Failed to parse commit metadata")
+                ));
+            }
         }
 
         #[test]
@@ -539,11 +500,7 @@ mod tests {
         }"#;
 
             let metadata: Map<String, Value> = serde_json::from_str(sample_json).unwrap();
-            let result = file_groups_from_commit_metadata_with_estimator(
-                &metadata,
-                &create_layout_v1_view(),
-                None,
-            );
+            let result = file_groups_from_commit_metadata(&metadata, &create_layout_v1_view());
             assert!(result.is_ok());
             let file_groups = result.unwrap();
             assert_eq!(file_groups.len(), 2);
@@ -573,11 +530,7 @@ mod tests {
         }"#;
 
             let metadata: Map<String, Value> = serde_json::from_str(sample_json).unwrap();
-            let result = file_groups_from_commit_metadata_with_estimator(
-                &metadata,
-                &create_layout_v1_view(),
-                None,
-            );
+            let result = file_groups_from_commit_metadata(&metadata, &create_layout_v1_view());
             assert!(result.is_ok());
             let file_groups = result.unwrap();
             assert_eq!(file_groups.len(), 1);
@@ -597,58 +550,44 @@ mod tests {
         }
 
         #[test]
-        fn test_mor_table_base_file_no_log_files() {
-            // MOR table with base file but no log files (initial insert)
-            let sample_json = r#"{
-            "partitionToWriteStats": {
-                "partition1": [{
-                    "fileId": "file-id-0",
-                    "baseFile": "file-id-0_0-7-24_20240418173200000.parquet"
-                }]
+        fn test_mor_table_base_file_without_log_files() {
+            // Both `logFiles` absent (initial insert) and `logFiles: []` (empty array)
+            // should yield a file slice with no log files.
+            let cases = [
+                r#"{
+                    "partitionToWriteStats": {
+                        "partition1": [{
+                            "fileId": "file-id-0",
+                            "baseFile": "file-id-0_0-7-24_20240418173200000.parquet"
+                        }]
+                    }
+                }"#,
+                r#"{
+                    "partitionToWriteStats": {
+                        "partition1": [{
+                            "fileId": "file-id-0",
+                            "baseFile": "file-id-0_0-7-24_20240418173200000.parquet",
+                            "logFiles": []
+                        }]
+                    }
+                }"#,
+            ];
+
+            for sample_json in cases {
+                let metadata: Map<String, Value> = serde_json::from_str(sample_json).unwrap();
+                let file_groups =
+                    file_groups_from_commit_metadata(&metadata, &create_layout_v1_view()).unwrap();
+                assert_eq!(file_groups.len(), 1);
+                let (_, file_slice) = file_groups
+                    .iter()
+                    .next()
+                    .unwrap()
+                    .file_slices
+                    .iter()
+                    .next()
+                    .unwrap();
+                assert!(file_slice.log_files.is_empty());
             }
-        }"#;
-
-            let metadata: Map<String, Value> = serde_json::from_str(sample_json).unwrap();
-            let result = file_groups_from_commit_metadata_with_estimator(
-                &metadata,
-                &create_layout_v1_view(),
-                None,
-            );
-            assert!(result.is_ok());
-            let file_groups = result.unwrap();
-            assert_eq!(file_groups.len(), 1);
-
-            let file_group = file_groups.iter().next().unwrap();
-            let (_, file_slice) = file_group.file_slices.iter().next().unwrap();
-            assert!(file_slice.log_files.is_empty());
-        }
-
-        #[test]
-        fn test_mor_table_base_file_empty_log_files() {
-            // MOR table with base file and empty log files array
-            let sample_json = r#"{
-            "partitionToWriteStats": {
-                "partition1": [{
-                    "fileId": "file-id-0",
-                    "baseFile": "file-id-0_0-7-24_20240418173200000.parquet",
-                    "logFiles": []
-                }]
-            }
-        }"#;
-
-            let metadata: Map<String, Value> = serde_json::from_str(sample_json).unwrap();
-            let result = file_groups_from_commit_metadata_with_estimator(
-                &metadata,
-                &create_layout_v1_view(),
-                None,
-            );
-            assert!(result.is_ok());
-            let file_groups = result.unwrap();
-            assert_eq!(file_groups.len(), 1);
-
-            let file_group = file_groups.iter().next().unwrap();
-            let (_, file_slice) = file_group.file_slices.iter().next().unwrap();
-            assert!(file_slice.log_files.is_empty());
         }
 
         #[test]
@@ -674,7 +613,7 @@ mod tests {
             }];
             let view = create_layout_v2_view(&instants);
 
-            let result = file_groups_from_commit_metadata_with_estimator(&metadata, &view, None);
+            let result = file_groups_from_commit_metadata(&metadata, &view);
             assert!(result.is_ok());
             let file_groups = result.unwrap();
             assert_eq!(file_groups.len(), 1);
@@ -719,7 +658,10 @@ mod tests {
         }
 
         #[test]
-        fn test_metadata_populated_from_write_stat_size() {
+        fn test_metadata_populated_from_write_stat_size_with_estimator() {
+            // No-estimator coverage lives in test_public_api_uses_no_estimator_for_cow_path_metadata.
+            // This test focuses on estimator-derived byte_size / num_records for the MOR
+            // baseFile path.
             let json = r#"{
                 "partitionToWriteStats": {
                     "p1": [{
@@ -732,30 +674,6 @@ mod tests {
             }"#;
             let metadata: Map<String, Value> = serde_json::from_str(json).unwrap();
 
-            // No estimator -> only `size` is populated.
-            let groups = file_groups_from_commit_metadata_with_estimator(
-                &metadata,
-                &create_layout_v1_view(),
-                None,
-            )
-            .unwrap();
-            let m = groups
-                .iter()
-                .next()
-                .unwrap()
-                .file_slices
-                .values()
-                .next()
-                .unwrap()
-                .base_file
-                .file_metadata
-                .as_ref()
-                .unwrap();
-            assert_eq!(m.size, 4096);
-            assert_eq!(m.byte_size, 0);
-            assert_eq!(m.num_records, 0);
-
-            // With estimator -> byte_size and num_records derived from on-disk size.
             let estimator = FileStatsEstimator::new(100.0, 2.5);
             let groups = file_groups_from_commit_metadata_with_estimator(
                 &metadata,
@@ -828,12 +746,8 @@ mod tests {
                 }
             }"#;
             let metadata: Map<String, Value> = serde_json::from_str(json).unwrap();
-            let groups = file_groups_from_commit_metadata_with_estimator(
-                &metadata,
-                &create_layout_v1_view(),
-                None,
-            )
-            .unwrap();
+            let groups =
+                file_groups_from_commit_metadata(&metadata, &create_layout_v1_view()).unwrap();
             let fs = groups
                 .iter()
                 .next()
