@@ -47,7 +47,6 @@ This issue tracks the release process as instructed in the [release guide](https
 - [ ] Upload the target RC artifacts to the ASF dev repo (SVN)
 - [ ] Verify the target RC artifacts
 - [ ] Push a desired RC release git tag to the release branch
-- [ ] Test the release candidate
 - [ ] Start VOTE in `dev@hudi.apache.org`
 
 > [!IMPORTANT]
@@ -91,7 +90,7 @@ For a patch release, don't cut a new branch, use its base release branch. For ex
 fixes to `release/0.3.x`.
 
 Create and merge a PR to bump the major or minor version on the `main` branch. For example, if the current version
-is `0.3.0`, bump it to `0.4.0` or `1.0.0`.
+is `0.3.0`, bump it to `0.5.0` or `1.0.0`.
 
 On the release branch, bump the version to indicate pre-release by pushing a commit.
 
@@ -196,21 +195,6 @@ git cliff release-$PREV_RELEASE_VER..HEAD | xclip
 
 Paste the changelog output as a comment on the tracking issue.
 
-### Test the release candidate
-
-> [!NOTE]
-> Wait for the publish CI to complete so the RC artifacts are available on PyPI and crates.io.
-
-Install the candidate and run the [usage examples](https://github.com/apache/hudi-rs?tab=readme-ov-file#usage-examples) against a sample [Hudi table](https://hudi.apache.org/docs/quick-start-guide) to verify basic functionality.
-
-```shell
-# Python (PyPI normalizes "x.y.z-rc.N" to "x.y.zrcN", e.g., 0.4.0rc1)
-pip install --pre hudi==x.y.zrcN
-
-# Rust
-cargo add hudi@x.y.z-rc.N
-```
-
 ### Start a `[VOTE]` thread
 
 > [!NOTE]
@@ -238,7 +222,11 @@ The complete staging area is available for you to review:
 * Source code commit CI has passed [6]
 * Python artifacts have been published to pypi.org [7]
 * Rust artifacts have been published to crates.io [8]
-* Manual testing can be done as per the examples in README [9]
+
+To verify basic functionality, install the RC and run the usage examples [9]:
+
+    pip install --pre hudi==0.1.0rc2   # Python (PyPI normalizes "0.1.0-rc.2" to "0.1.0rc2")
+    cargo add hudi@0.1.0-rc.2          # Rust
 
 The vote will be open for at least 72 hours. It is adopted by majority
 approval, with at least 3 PMC affirmative votes.
@@ -348,25 +336,25 @@ Go to `https://github.com/apache/hudi-rs/releases/new` and draft a new release.
 Send to `dev@hudi.apache.org` and `user@hudi.apache.org`.
 
 ```text
-subject: [ANNOUNCE] Hudi-rs 0.4.0 released
+subject: [ANNOUNCE] Hudi-rs 0.5.0 released
 
 Hi all,
 
-The Apache Hudi community is pleased to announce the release 0.4.0 of
+The Apache Hudi community is pleased to announce the release 0.5.0 of
 Hudi-rs (https://github.com/apache/hudi-rs), the native Rust implementation for
 Apache Hudi, with C++ and Python API bindings.
 
 Highlights for this release:
 
-- Add C++ bindings for File Group API to support reading file slices
-- Support reading MOR table having Avro data block and delete block (previously only Parquet log block was supported)
-- Support more timestamp formats for time-travel and incremental queries
+- Highlight 1
+- Highlight 2
+- Highlight 3
 
 The release notes can be found here
-https://github.com/apache/hudi-rs/releases/tag/release-0.4.0
+https://github.com/apache/hudi-rs/releases/tag/release-0.5.0
 
 The source releases are available here
-https://dist.apache.org/repos/dist/release/hudi/hudi-rs-0.4.0/
+https://dist.apache.org/repos/dist/release/hudi/hudi-rs-0.5.0/
 
 Please refer to the readme for installation and usage examples
 https://github.com/apache/hudi-rs/blob/main/README.md
@@ -377,7 +365,7 @@ with us!
 - LinkedIn: https://www.linkedin.com/company/apache-hudi/
 - X/Twitter: https://x.com/apachehudi/
 - YouTube: https://www.youtube.com/@apachehudi
-- Slack support: https://join.slack.com/t/apache-hudi/shared_invite/zt-2ggm1fub8-_yt4Reu9djwqqVRFC7X49g
+- Slack support: https://hudi.apache.org/slack
 
 For users in China, follow WeChat "ApacheHudi" 微信公众号 for news and blogs,
 and join DingTalk group 钉钉群 35087066 for questions.
