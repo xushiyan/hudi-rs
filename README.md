@@ -32,7 +32,7 @@
   <a href="https://codecov.io/github/apache/hudi-rs">
     <img alt="hudi-rs codecov" src="https://codecov.io/github/apache/hudi-rs/graph/badge.svg">
   </a>
-  <a href="https://join.slack.com/t/apache-hudi/shared_invite/zt-2ggm1fub8-_yt4Reu9djwqqVRFC7X49g">
+  <a href="https://hudi.apache.org/slack">
     <img alt="join hudi slack" src="https://img.shields.io/badge/slack-%23hudi-72eff8?logo=slack&color=48c628">
   </a>
   <a href="https://x.com/apachehudi">
@@ -269,7 +269,7 @@ extension to query Hudi tables.
 
 ```shell
 cargo new my_project --bin && cd my_project
-cargo add tokio@1 datafusion@45
+cargo add tokio@1 datafusion@52
 cargo add hudi --features datafusion
 ```
 
@@ -308,15 +308,15 @@ async fn main() -> Result<()> {
 
 #### Python
 ```python
-    from datafusion import SessionContext
-    from hudi import HudiDataFusionDataSource
+from datafusion import SessionContext
+from hudi import HudiDataFusionDataSource
 
-    table = HudiDataFusionDataSource(
-        "/tmp/trips_table", [("hoodie.read.use.read_optimized.mode", "true")]
-    )
-    ctx = SessionContext()
-    ctx.register_table_provider("trips", table)
-    ctx.sql("SELECT  max(fare), city from trips group by city order by 1 desc").show()
+table = HudiDataFusionDataSource(
+    "/tmp/trips_table", [("hoodie.read.input.partitions", "5")]
+)
+ctx = SessionContext()
+ctx.register_table_provider("trips", table)
+ctx.sql("SELECT max(fare), city from trips group by city order by 1 desc").show()
 ```
 
 ### Other Integrations
@@ -350,13 +350,15 @@ hudi_table = (
 #### Rust
 
 ```rust
+use hudi::error::Result;
 use hudi::table::builder::TableBuilder as HudiTableBuilder;
 
+#[tokio::main]
 async fn main() -> Result<()> {
-    let hudi_table = 
-        HudiTableBuilder::from_base_uri("s3://bucket/trips_table")
+    let hudi_table = HudiTableBuilder::from_base_uri("s3://bucket/trips_table")
         .with_option("aws_region", "us-west-2")
         .build().await?;
+    Ok(())
 }
 ```
 
