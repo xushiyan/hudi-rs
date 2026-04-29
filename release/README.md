@@ -47,6 +47,7 @@ This issue tracks the release process as instructed in the [release guide](https
 - [ ] Upload the target RC artifacts to the ASF dev repo (SVN)
 - [ ] Verify the target RC artifacts
 - [ ] Push a desired RC release git tag to the release branch
+- [ ] Test the release candidate
 - [ ] Start VOTE in `dev@hudi.apache.org`
 
 > [!IMPORTANT]
@@ -194,6 +195,21 @@ git cliff release-$PREV_RELEASE_VER..HEAD | xclip
 ```
 
 Paste the changelog output as a comment on the tracking issue.
+
+### Test the release candidate
+
+> [!NOTE]
+> Wait for the publish CI to complete so the RC artifacts are available on PyPI and crates.io.
+
+Install the candidate and run the [usage examples](https://github.com/apache/hudi-rs?tab=readme-ov-file#usage-examples) against a sample [Hudi table](https://hudi.apache.org/docs/quick-start-guide) to verify basic functionality.
+
+```shell
+# Python (PyPI normalizes "x.y.z-rc.N" to "x.y.zrcN", e.g., 0.4.0rc1)
+pip install --pre hudi==x.y.zrcN
+
+# Rust
+cargo add hudi@x.y.z-rc.N
+```
 
 ### Start a `[VOTE]` thread
 
