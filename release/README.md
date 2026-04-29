@@ -203,11 +203,11 @@ Paste the changelog output as a comment on the tracking issue.
 Send to `dev@hudi.apache.org`.
 
 ```text
-[VOTE] hudi-rs 0.1.0, release candidate #2
+[VOTE] hudi-rs x.y.z, release candidate #N
 
 Hi everyone,
 
-Please review and vote on hudi-rs 0.1.0-rc.2 as follows:
+Please review and vote on hudi-rs x.y.z-rc.N as follows:
 
 [ ] +1, Approve the release
 [ ] -1, Do not approve the release (please provide specific comments)
@@ -218,15 +218,15 @@ The complete staging area is available for you to review:
 * Categorized changelog for this release [2]
 * Source release has been deployed to dist.apache.org [3]
 * Source release can be verified using this script [4]
-* Source code commit is tagged as "release-0.1.0-rc.2" [5]
+* Source code commit is tagged as "release-x.y.z-rc.N" [5]
 * Source code commit CI has passed [6]
 * Python artifacts have been published to pypi.org [7]
 * Rust artifacts have been published to crates.io [8]
 
 To verify basic functionality, install the RC and run the usage examples [9]:
 
-    pip install --pre hudi==0.1.0rc2   # Python (PyPI normalizes "0.1.0-rc.2" to "0.1.0rc2")
-    cargo add hudi@0.1.0-rc.2          # Rust
+    pip install --pre hudi==x.y.zrcN   # Python (PyPI normalizes "x.y.z-rc.N" to "x.y.zrcN")
+    cargo add hudi@x.y.z-rc.N          # Rust
 
 The vote will be open for at least 72 hours. It is adopted by majority
 approval, with at least 3 PMC affirmative votes.
@@ -234,14 +234,14 @@ approval, with at least 3 PMC affirmative votes.
 Thanks,
 Release Manager
 
-[1] https://github.com/apache/hudi-rs/issues/62
-[2] https://github.com/apache/hudi-rs/issues/62#issuecomment-2224322166
-[3] https://dist.apache.org/repos/dist/dev/hudi/hudi-rs-0.1.0-rc.2/
-[4] https://github.com/apache/hudi-rs/blob/7b2d199c180bf36e2fac5e03559fffbfe00bf5fe/release/verify_src_release.sh
-[5] https://github.com/apache/hudi-rs/releases/tag/release-0.1.0-rc.2
-[6] https://github.com/apache/hudi-rs/actions/runs/9901188924
-[7] https://pypi.org/project/hudi/0.1.0rc2/
-[8] https://crates.io/crates/hudi/0.1.0-rc.2
+[1] https://github.com/apache/hudi-rs/issues/xxx
+[2] https://github.com/apache/hudi-rs/issues/xxx#issuecomment-xxx
+[3] https://dist.apache.org/repos/dist/dev/hudi/hudi-rs-x.y.z-rc.N/
+[4] https://github.com/apache/hudi-rs/blob/<commit-hash>/release/verify_src_release.sh
+[5] https://github.com/apache/hudi-rs/releases/tag/release-x.y.z-rc.N
+[6] https://github.com/apache/hudi-rs/actions/runs/xxx
+[7] https://pypi.org/project/hudi/x.y.zrcN/
+[8] https://crates.io/crates/hudi/x.y.z-rc.N
 [9] https://github.com/apache/hudi-rs?tab=readme-ov-file#usage-examples
 ```
 
