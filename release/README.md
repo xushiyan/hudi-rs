@@ -317,7 +317,12 @@ git cliff release-$PREV_RELEASE_VER..HEAD | pbcopy
 git cliff release-$PREV_RELEASE_VER..HEAD | xclip
 ```
 
-Go to your fork repo, create a new branch from main, prepend the copied output to `changelog.md` and create a PR to merge it to the `main` branch.
+In your fork, create a new branch from `main`, prepend the clipboard content to `changelog.md`, then commit and open a PR to merge into `main`.
+
+```shell
+git commit -am "chore: update changelog for x.y.z"
+git push
+```
 
 ### Publish Release Notes
 
