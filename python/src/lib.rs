@@ -38,6 +38,8 @@ fn _internal(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<HudiTable>()?;
     m.add_class::<HudiTimeline>()?;
 
+    m.add_function(wrap_pyfunction!(internal::_config_keys, m)?)?;
+
     #[cfg(feature = "datafusion")]
     {
         use datafusion_internal::HudiDataFusionDataSource;

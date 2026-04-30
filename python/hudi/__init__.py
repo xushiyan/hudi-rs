@@ -16,6 +16,7 @@
 #  under the License.
 
 
+from hudi._config import HudiReadConfig, HudiTableConfig
 from hudi._internal import (
     HudiDataFusionDataSource,
     HudiFileGroupReader,
@@ -32,7 +33,9 @@ __all__ = [
     "HudiFileGroupReader",
     "HudiFileSlice",
     "HudiInstant",
+    "HudiReadConfig",
     "HudiTable",
     "HudiTableBuilder",
+    "HudiTableConfig",
     "HudiTimeline",
 ]
