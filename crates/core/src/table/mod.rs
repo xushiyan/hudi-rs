@@ -942,12 +942,16 @@ impl Table {
                     .base_file
                     .file_metadata
                     .as_ref()
-                    .map(|m| m.num_records as u64)
+                    .map(|m| m.num_records.max(0) as u64)
                     .unwrap_or(0);
                 let logs: u64 = fs
                     .log_files
                     .iter()
-                    .filter_map(|lf| lf.file_metadata.as_ref().map(|m| m.num_records as u64))
+                    .filter_map(|lf| {
+                        lf.file_metadata
+                            .as_ref()
+                            .map(|m| m.num_records.max(0) as u64)
+                    })
                     .sum();
                 base + logs
             })

@@ -184,6 +184,8 @@ Available pairs: `with_hudi_option` / `with_hudi_options`, `with_storage_option`
 | `FileSlice::base_file_relative_path()` / `log_file_relative_path(&LogFile)`                                   | Paths relative to the table base URI.                  |
 | `FileSlice::total_size_bytes()`                                                                                | Sum of base + log file on-disk sizes. Missing metadata contributes 0. |
 
+`FileSlice` uses the base file's `num_records` as the record count for the slice. Log file record counts are not included in this field because the base file already represents the materialized state after compaction. For incremental stats (`compute_table_stats` with incremental options), both base and log file record counts are summed to approximate the volume of changes. File slices without a base file (log-only groups) are not yet supported.
+
 ## 5. Python API
 
 All symbols are exported from the top-level `hudi` package.
