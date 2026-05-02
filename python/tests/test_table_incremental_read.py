@@ -24,24 +24,79 @@ return the updated TXN-001 row.
 
 import pyarrow as pa
 
-from hudi import HudiTable
+from hudi import HudiQueryType, HudiReadOptions, HudiTable
 from hudi._internal import get_test_table_path
 
 
-def test_table_incremental_read_returns_correct_data():
-    table_path = get_test_table_path("v9_txns_simple_nometa", "cow")
-    table = HudiTable(table_path)
+def _commits(table: HudiTable):
+    return table.get_timeline().get_completed_commits()
 
-    timeline = table.get_timeline()
-    commits = timeline.get_completed_commits()
+
+def test_table_incremental_read_returns_correct_data():
+    table = HudiTable(get_test_table_path("v9_txns_simple_nometa", "cow"))
+    commits = _commits(table)
     assert len(commits) >= 2
 
-    insert_ts = commits[0].timestamp
-    update_ts = commits[1].timestamp
-
-    batches = table.read_incremental_records(insert_ts, update_ts)
+    options = (
+        HudiReadOptions()
+        .with_query_type(HudiQueryType.Incremental)
+        .with_start_timestamp(commits[0].timestamp)
+        .with_end_timestamp(commits[1].timestamp)
+    )
+    batches = table.read(options)
     t = pa.Table.from_batches(batches)
 
     assert t.num_rows == 1
     assert t.column("txn_id").to_pylist() == ["TXN-001"]
     assert t.column("txn_type").to_pylist() == ["reversal"]
+
+
+def test_incremental_read_with_partition_filter():
+    table = HudiTable(get_test_table_path("v9_txns_simple_nometa", "cow"))
+    commits = _commits(table)
+    insert_ts, update_ts = commits[0].timestamp, commits[1].timestamp
+
+    # TXN-001 lives in region 'us'; filtering to 'us' keeps it.
+    options_us = (
+        HudiReadOptions(filters=[("region", "=", "us")])
+        .with_query_type(HudiQueryType.Incremental)
+        .with_start_timestamp(insert_ts)
+        .with_end_timestamp(update_ts)
+    )
+    batches = table.read(options_us)
+    t = pa.Table.from_batches(batches)
+    assert t.num_rows == 1
+    assert t.column("txn_id").to_pylist() == ["TXN-001"]
+
+    # Filtering to a non-matching region prunes the change away.
+    options_eu = (
+        HudiReadOptions(filters=[("region", "=", "eu")])
+        .with_query_type(HudiQueryType.Incremental)
+        .with_start_timestamp(insert_ts)
+        .with_end_timestamp(update_ts)
+    )
+    batches = table.read(options_eu)
+    assert sum(b.num_rows for b in batches) == 0
+
+
+def test_get_incremental_file_slices_with_partition_filter():
+    table = HudiTable(get_test_table_path("v9_txns_simple_nometa", "cow"))
+    commits = _commits(table)
+    insert_ts, update_ts = commits[0].timestamp, commits[1].timestamp
+
+    slices_us = table.get_file_slices(
+        HudiReadOptions(filters=[("region", "=", "us")])
+        .with_query_type(HudiQueryType.Incremental)
+        .with_start_timestamp(insert_ts)
+        .with_end_timestamp(update_ts)
+    )
+    assert len(slices_us) == 1
+    assert "region=us" in slices_us[0].base_file_relative_path()
+
+    slices_eu = table.get_file_slices(
+        HudiReadOptions(filters=[("region", "=", "eu")])
+        .with_query_type(HudiQueryType.Incremental)
+        .with_start_timestamp(insert_ts)
+        .with_end_timestamp(update_ts)
+    )
+    assert len(slices_eu) == 0

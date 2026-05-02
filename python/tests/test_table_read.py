@@ -22,11 +22,9 @@ UPDATE rider-J fare=0, DELETE rider-J, UPDATE rider-G fare=0.
 Final state: 6 rows (riders A, C, D, E, G, I).
 """
 
-from itertools import chain
-
 import pyarrow as pa
 
-from hudi import HudiTable
+from hudi import HudiReadOptions, HudiTable
 
 
 def test_read_table_has_correct_schema(v8_trips_table):
@@ -73,24 +71,21 @@ def test_read_table_can_read_from_batches(v8_trips_table):
 
     file_slices = table.get_file_slices()
     file_slice_paths = [f.base_file_relative_path() for f in file_slices]
-    batch = (
-        table.create_file_group_reader_with_options().read_file_slice_by_base_file_path(
-            file_slice_paths[0]
-        )
+    batch = table.create_file_group_reader_with_options().read_file_slice_from_paths(
+        file_slice_paths[0], []
     )
     t = pa.Table.from_batches([batch])
     assert t.num_rows > 0
     assert t.num_columns == 11
 
-    file_slices_gen = iter(table.get_file_slices_splits(2))
-    assert len(next(file_slices_gen)) == 2
-    assert len(next(file_slices_gen)) == 1
+    all_slices = table.get_file_slices()
+    assert len(all_slices) == 3
 
 
 def test_read_table_returns_correct_data(v8_trips_table):
     table = HudiTable(v8_trips_table)
 
-    batches = table.read_snapshot()
+    batches = table.read()
     t = (
         pa.Table.from_batches(batches)
         .select(["ts", "uuid", "rider", "fare"])
@@ -123,7 +118,7 @@ def test_read_table_returns_correct_data(v8_trips_table):
 def test_read_table_for_partition(v8_trips_table):
     table = HudiTable(v8_trips_table)
 
-    batches = table.read_snapshot([("city", "=", "san_francisco")])
+    batches = table.read(HudiReadOptions(filters=[("city", "=", "san_francisco")]))
     t = (
         pa.Table.from_batches(batches)
         .select(["ts", "uuid", "rider", "fare"])
@@ -148,8 +143,8 @@ def test_table_apis_as_of_timestamp(v8_trips_table):
     all_commits = timeline.get_completed_commits()
     first_commit = all_commits[0].timestamp
 
-    file_slices_gen = table.get_file_slices_splits_as_of(2, first_commit)
-    all_slices = list(chain.from_iterable(file_slices_gen))
+    options_at_first = HudiReadOptions().with_as_of_timestamp(first_commit)
+    all_slices = table.get_file_slices(options_at_first)
     assert len(all_slices) == 3
     partition_prefixes = sorted(
         f.base_file_relative_path().split("/")[0] for f in all_slices
@@ -162,7 +157,7 @@ def test_table_apis_as_of_timestamp(v8_trips_table):
 
     # get_completed_commits() returns compaction commits for MOR tables.
     # The sole compaction commit predates the final deltacommit (rider-G update).
-    batches = table.read_snapshot_as_of(first_commit)
+    batches = table.read(options_at_first)
     t = (
         pa.Table.from_batches(batches)
         .select(["ts", "uuid", "rider", "fare"])
@@ -192,7 +187,30 @@ def test_convert_filters_valid(v8_trips_table):
     expected = [1, 1, 1, 2, 2]
 
     for f, exp in zip(filters, expected):
-        file_slices = table.get_file_slices(filters=[f])
+        file_slices = table.get_file_slices(HudiReadOptions(filters=[f]))
         assert len(file_slices) == exp, (
             f"Filter {f} expected {exp} slices, got {len(file_slices)}"
         )
+
+
+def test_read_snapshot_filters_apply_as_row_predicate(v8_trips_table):
+    """Filters on a non-partition column drop rows during reading.
+
+    'rider' is a non-partition column. Filtering on it does not prune any files
+    (since stats may not exclude the file), but rows must still be filtered.
+    """
+    table = HudiTable(v8_trips_table)
+    options = HudiReadOptions(filters=[("rider", "=", "rider-A")])
+    batches = table.read(options)
+    t = pa.Table.from_batches(batches)
+    assert t.num_rows == 1
+    assert t.column("rider").to_pylist() == ["rider-A"]
+
+
+def test_read_snapshot_stream_filters_apply_as_row_predicate(v8_trips_table):
+    table = HudiTable(v8_trips_table)
+    options = HudiReadOptions(filters=[("rider", "=", "rider-A")])
+    batches = list(table.read_stream(options))
+    t = pa.Table.from_batches(batches)
+    assert t.num_rows == 1
+    assert t.column("rider").to_pylist() == ["rider-A"]

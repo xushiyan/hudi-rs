@@ -62,18 +62,22 @@ Hudi integration in the data ecosystems for a diverse range of users and project
 > These examples expect a Hudi table exists at `/tmp/trips_table`, created using
 > the [quick start guide](https://hudi.apache.org/docs/quick-start-guide).
 
+For the full reader API reference (`ReadOptions`, filter expressions, behavioral guarantees), see [docs/reader-spec.md](docs/reader-spec.md).
+
 ### Snapshot Query
 
-Snapshot query reads the latest version of the data from the table. The table API also accepts partition filters.
+Snapshot query reads the latest version of the data from the table. The table API also accepts column filters that drive partition + file pruning and row-level filtering.
 
 #### Python
 
 ```python
-from hudi import HudiTableBuilder
+from hudi import HudiReadOptions, HudiTableBuilder
 import pyarrow as pa
 
 hudi_table = HudiTableBuilder.from_base_uri("/tmp/trips_table").build()
-batches = hudi_table.read_snapshot(filters=[("city", "=", "san_francisco")])
+batches = hudi_table.read(
+    HudiReadOptions(filters=[("city", "=", "san_francisco")])
+)
 
 # convert to PyArrow table
 arrow_table = pa.Table.from_batches(batches)
@@ -85,13 +89,15 @@ print(result)
 
 ```rust
 use hudi::error::Result;
+use hudi::table::ReadOptions;
 use hudi::table::builder::TableBuilder as HudiTableBuilder;
 use arrow::compute::concat_batches;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let hudi_table = HudiTableBuilder::from_base_uri("/tmp/trips_table").build().await?;
-    let batches = hudi_table.read_snapshot(&[("city", "=", "san_francisco")]).await?;
+    let options = ReadOptions::new().with_filters([("city", "=", "san_francisco")])?;
+    let batches = hudi_table.read(&options).await?;
     let batch = concat_batches(&batches[0].schema(), &batches)?;
     let columns = vec!["rider", "city", "ts", "fare"];
     for col_name in columns {
@@ -130,23 +136,24 @@ let hudi_table =
 
 ### Time-Travel Query
 
-Time-travel query reads the data at a specific timestamp from the table. The table API also accepts partition filters.
+Time-travel query reads the data at a specific timestamp from the table. The table API also accepts column filters that drive partition + file pruning and row-level filtering.
 
 #### Python
 
 ```python
-batches = (
-    hudi_table
-    .read_snapshot_as_of("20241231123456789", filters=[("city", "=", "san_francisco")])
+batches = hudi_table.read(
+    HudiReadOptions(filters=[("city", "=", "san_francisco")])
+    .with_as_of_timestamp("20241231123456789")
 )
 ```
 
 #### Rust
 
 ```rust
-let batches = 
-    hudi_table
-    .read_snapshot_as_of("20241231123456789", &[("city", "=", "san_francisco")]).await?;
+let options = ReadOptions::new()
+    .with_as_of_timestamp("20241231123456789")
+    .with_filters([("city", "=", "san_francisco")])?;
+let batches = hudi_table.read(&options).await?;
 ```
 
 <details>
@@ -155,14 +162,13 @@ let batches =
 The supported formats for the timestamp argument are:
 - Hudi Timeline format (highest matching precedence): `yyyyMMddHHmmssSSS` or `yyyyMMddHHmmss`.
 - Unix epoch time in seconds, milliseconds, microseconds, or nanoseconds.
-- ISO 8601 format including but not limited to:
+- RFC 3339 / ISO 8601 with timezone offset, including:
   - `yyyy-MM-dd'T'HH:mm:ss.SSS+00:00`
   - `yyyy-MM-dd'T'HH:mm:ss.SSSZ`
-  - `yyyy-MM-dd'T'HH:mm:ss.SSS`
   - `yyyy-MM-dd'T'HH:mm:ss+00:00`
   - `yyyy-MM-dd'T'HH:mm:ssZ`
-  - `yyyy-MM-dd'T'HH:mm:ss`
-  - `yyyy-MM-dd`
+
+Timestamp strings without a timezone offset (for example `yyyy-MM-dd'T'HH:mm:ss`) and date-only strings (for example `yyyy-MM-dd`) are not accepted.
 </details>
 
 ### Incremental Query
@@ -172,24 +178,95 @@ Incremental query reads the changed data from the table for a given time range.
 #### Python
 
 ```python
-# read the records between t1 (exclusive) and t2 (inclusive)
-batches = hudi_table.read_incremental_records(t1, t2)
+from hudi import HudiQueryType
 
-# read the records after t1
-batches = hudi_table.read_incremental_records(t1)
+# read the records between t1 (exclusive) and t2 (inclusive)
+batches = hudi_table.read(
+    HudiReadOptions()
+    .with_query_type(HudiQueryType.Incremental)
+    .with_start_timestamp(t1)
+    .with_end_timestamp(t2)
+)
+
+# read the records after t1 (end defaults to the latest commit)
+batches = hudi_table.read(
+    HudiReadOptions()
+    .with_query_type(HudiQueryType.Incremental)
+    .with_start_timestamp(t1)
+)
+
+# with column filters applied to the changed records
+batches = hudi_table.read(
+    HudiReadOptions(filters=[("city", "=", "san_francisco")])
+    .with_query_type(HudiQueryType.Incremental)
+    .with_start_timestamp(t1)
+    .with_end_timestamp(t2)
+)
 ```
 
 #### Rust
 
 ```rust
-// read the records between t1 (exclusive) and t2 (inclusive)
-let batches = hudi_table.read_incremental_records(t1, Some(t2)).await?;
+use hudi::table::QueryType;
 
-// read the records after t1
-let batches = hudi_table.read_incremental_records(t1, None).await?;
+// read the records between t1 (exclusive) and t2 (inclusive)
+let options = ReadOptions::new()
+    .with_query_type(QueryType::Incremental)
+    .with_start_timestamp(t1)
+    .with_end_timestamp(t2);
+let batches = hudi_table.read(&options).await?;
+
+// read the records after t1 (end defaults to the latest commit)
+let options = ReadOptions::new()
+    .with_query_type(QueryType::Incremental)
+    .with_start_timestamp(t1);
+let batches = hudi_table.read(&options).await?;
+
+// with column filters applied to the changed records
+let options = ReadOptions::new()
+    .with_query_type(QueryType::Incremental)
+    .with_start_timestamp(t1)
+    .with_end_timestamp(t2)
+    .with_filters([("city", "=", "san_francisco")])?;
+let batches = hudi_table.read(&options).await?;
 ```
 
 *Incremental queries support the same timestamp formats as time-travel queries.*
+
+### Streaming Read
+
+Streaming reads yield `RecordBatch`es one at a time without loading the full result into memory.
+The same `ReadOptions` knobs apply, plus `batch_size` and `projection`.
+
+#### Python
+
+```python
+options = (
+    HudiReadOptions(
+        filters=[("city", "=", "san_francisco")],
+        projection=["rider", "city", "ts", "fare"],
+    )
+    .with_batch_size(4096)
+)
+for batch in hudi_table.read_stream(options):
+    print(batch.num_rows)
+```
+
+#### Rust
+
+```rust
+use futures::StreamExt;
+
+let options = ReadOptions::new()
+    .with_filters([("city", "=", "san_francisco")])?
+    .with_projection(["rider", "city", "ts", "fare"])
+    .with_batch_size(4096)?;
+let mut stream = hudi_table.read_stream(&options).await?;
+while let Some(batch) = stream.next().await {
+    let batch = batch?;
+    println!("{}", batch.num_rows());
+}
+```
 
 ### File Group Reading (Experimental)
 
@@ -202,23 +279,30 @@ engines, where the plan provides file paths.
 from hudi import HudiFileGroupReader
 
 reader = HudiFileGroupReader(
-    "/table/base/path", {"hoodie.read.file_group.start_timestamp": "0"})
+    "/table/base/path", {"hoodie.read.start.timestamp": "0"})
 
 # Returns a PyArrow RecordBatch
-record_batch = reader.read_file_slice_by_base_file_path("relative/path.parquet")
+record_batch = reader.read_file_slice_from_paths("relative/path.parquet", [])
 ```
 
 #### Rust
 
 ```rust,ignore
 use hudi::file_group::reader::FileGroupReader;
+use hudi::table::ReadOptions;
 
 // Inside an async context
 let reader = FileGroupReader::new_with_options(
-    "/table/base/path", [("hoodie.read.file_group.start_timestamp", "0")]).await?;
+    "/table/base/path", [("hoodie.read.start.timestamp", "0")]).await?;
 
 // Returns an Arrow RecordBatch
-let record_batch = reader.read_file_slice_by_base_file_path("relative/path.parquet").await?;
+let record_batch = reader
+    .read_file_slice_from_paths(
+        "relative/path.parquet",
+        Vec::<&str>::new(),
+        &ReadOptions::new(),
+    )
+    .await?;
 ```
 
 #### C++
@@ -230,10 +314,11 @@ let record_batch = reader.read_file_slice_by_base_file_path("relative/path.parqu
 
 // Functions may throw rust::Error on failure
 auto reader = new_file_group_reader_with_options(
-    "/table/base/path", {"hoodie.read.file_group.start_timestamp=0"});
+    "/table/base/path", {"hoodie.read.start.timestamp=0"});
 
 // Returns an ArrowArrayStream pointer
-ArrowArrayStream* stream_ptr = reader->read_file_slice_by_base_file_path("relative/path.parquet");
+std::vector<std::string> log_file_paths{};
+ArrowArrayStream* stream_ptr = reader->read_file_slice_from_paths("relative/path.parquet", log_file_paths);
 ```
 
 ## Query Engine Integration
@@ -244,23 +329,33 @@ Hudi-rs provides APIs to support integration with query engines. The sections be
 
 Create a Hudi table instance using its constructor or the `TableBuilder` API.
 
-| Stage           | API                                       | Description                                                                    |
-|-----------------|-------------------------------------------|--------------------------------------------------------------------------------|
-| Query planning  | `get_file_slices()`                       | For snapshot query, get a list of file slices.                                 |
-|                 | `get_file_slices_splits()`                | For snapshot query, get a list of file slices in splits.                       |
-|                 | `get_file_slices_as_of()`                 | For time-travel query, get a list of file slices at a given time.              |
-|                 | `get_file_slices_splits_as_of()`          | For time-travel query, get a list of file slices in splits at a given time.    |
-|                 | `get_file_slices_between()`               | For incremental query, get a list of changed file slices between a time range. |
-| Query execution | `create_file_group_reader_with_options()` | Create a file group reader instance with the table instance's configs.         |
+All read APIs accept a `ReadOptions` (Rust) / `HudiReadOptions` (Python) value. It stores three fields — `filters`, `projection`, and `hudi_options` — and exposes chainable `with_*` builders for the rest. The available knobs:
+
+- `query_type` (`with_query_type`) — `Snapshot` (default) or `Incremental`. Drives dispatch in `read`, `read_stream`, and `get_file_slices`.
+- `filters` — column filters as `(field, op, value)` tuples. The field can be any column (partition or data). Used for partition pruning, file-level stats pruning (snapshot only), and row-level filtering.
+- `projection` — columns to return. Streaming pushes the projection down to the parquet reader; eager reads project after merging.
+- `batch_size` (`with_batch_size`) — rows per batch (streaming only; eager reads return one batch per file slice).
+- `as_of_timestamp` (`with_as_of_timestamp`) — snapshot/time-travel timestamp (defaults to latest commit).
+- `start_timestamp` / `end_timestamp` (`with_start_timestamp` / `with_end_timestamp`) — incremental range (defaults to earliest…latest).
+- `hudi_options` — per-read Hudi configs that override table-level defaults (e.g. `hoodie.read.use.read_optimized.mode`).
+
+| Stage           | API                                                              | Description                                                                                              |
+|-----------------|------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
+| Query planning  | `get_file_slices(options)`                                       | Get the file slices the read targets, dispatched on `options.query_type`. To bucket for parallel reads, call `hudi::util::collection::split_into_chunks` on the result. |
+|                 | `compute_table_stats()`                                          | Estimated `(num_rows, byte_size)` for scan planning. Returns `None` when the metadata table is disabled. |
+| Query execution | `create_file_group_reader_with_options(read_options, extras)`    | Create a file group reader with the table's configs. Both args are optional; `read_options.hudi_options` overrides table-level defaults (excluding the four `Table`-owned read keys), and `extras` always wins. |
+|                 | `read(options)` / `read_stream(options)`                         | Record-read APIs. Dispatch on `options.query_type`. `read_stream` errors on `Incremental` for now. Per-slice streaming lives on `FileGroupReader`. |
 
 ### File Group API
 
 Create a Hudi file group reader instance using its constructor or the Hudi table API `create_file_group_reader_with_options()`.
 
-| Stage           | API                                   | Description                                                                                                                                                                        |
-|-----------------|---------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Query execution | `read_file_slice()`                   | Read records from a given file slice; based on the configs, read records from only base file, or from base file and log files, and merge records based on the configured strategy. |
-|                 | `read_file_slice_by_base_file_path()` | Read records from a given base file path; log files will be ignored                                                                                                                |
+| Stage           | API                                     | Description                                                                                                                                                                        |
+|-----------------|-----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Query execution | `read_file_slice()`                     | Read records from a given file slice; based on the configs, read records from only base file, or from base file and log files, and merge records based on the configured strategy. |
+|                 | `read_file_slice_from_paths()`          | Read records from an explicit base file path and a list of log file paths. Pass an empty log path list to read just the base file.                                                 |
+|                 | `read_file_slice_stream()`              | Streaming version of `read_file_slice()`. Yields true streaming batches when the slice is base-file-only or read-optimized; for MOR slices with log files, falls back to a single merged batch. |
+|                 | `read_file_slice_from_paths_stream()`   | Streaming version of `read_file_slice_from_paths()`.                                                                                                                               |
 
 
 ### Apache DataFusion

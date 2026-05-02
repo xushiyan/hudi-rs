@@ -258,10 +258,11 @@ impl Table {
         }
 
         let file_slice = file_slices.into_iter().next().unwrap();
-        let fg_reader = self.create_file_group_reader_with_options([(
-            HudiReadConfig::FileGroupEndTimestamp,
-            timestamp,
-        )])?;
+        let fg_reader = self.create_file_group_reader_with_options(
+            None,
+            [(HudiReadConfig::EndTimestamp, timestamp)],
+            std::iter::empty::<(&str, &str)>(),
+        )?;
 
         fg_reader
             .read_metadata_table_files_partition(&file_slice, keys)

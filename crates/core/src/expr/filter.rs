@@ -29,27 +29,27 @@ use std::str::FromStr;
 
 #[derive(Debug, Clone)]
 pub struct Filter {
-    pub field_name: String,
+    pub field: String,
     pub operator: ExprOperator,
     pub values: Vec<String>,
 }
 
 impl Filter {
-    pub fn new(field_name: String, operator: ExprOperator, values: Vec<String>) -> Result<Self> {
+    pub fn new(field: String, operator: ExprOperator, values: Vec<String>) -> Result<Self> {
         if operator.is_multi_value() {
             if values.is_empty() {
                 return Err(CoreError::Schema(format!(
-                    "{operator} operator requires at least one value for field '{field_name}'"
+                    "{operator} operator requires at least one value for field '{field}'"
                 )));
             }
         } else if values.len() != 1 {
             return Err(CoreError::Schema(format!(
-                "Operator {operator} requires exactly one value for field '{field_name}', got {}",
+                "Operator {operator} requires exactly one value for field '{field}', got {}",
                 values.len()
             )));
         }
         Ok(Self {
-            field_name,
+            field,
             operator,
             values,
         })
@@ -67,8 +67,17 @@ impl Filter {
 
 impl From<Filter> for (String, String, String) {
     fn from(filter: Filter) -> Self {
-        let value_str = filter.values.join(",");
-        (filter.field_name, filter.operator.to_string(), value_str)
+        let value_str = if filter.operator.is_multi_value() {
+            filter
+                .values
+                .iter()
+                .map(|v| escape_in_value(v))
+                .collect::<Vec<_>>()
+                .join(",")
+        } else {
+            filter.values.first().cloned().unwrap_or_default()
+        };
+        (filter.field, filter.operator.to_string(), value_str)
     }
 }
 
@@ -76,20 +85,72 @@ impl TryFrom<(&str, &str, &str)> for Filter {
     type Error = CoreError;
 
     fn try_from(binary_expr_tuple: (&str, &str, &str)) -> Result<Self, Self::Error> {
-        let (field_name, operator_str, field_value) = binary_expr_tuple;
-        let field_name = field_name.to_string();
+        let (field, operator_str, field_value) = binary_expr_tuple;
+        let field = field.to_string();
         let operator = ExprOperator::from_str(operator_str)?;
         let values = if operator.is_multi_value() {
-            field_value
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
+            split_in_values(field_value)
         } else {
             vec![field_value.to_string()]
         };
-        Filter::new(field_name, operator, values)
+        Filter::new(field, operator, values)
     }
+}
+
+/// Split a multi-value (`IN` / `NOT IN`) value string on unescaped commas, then
+/// trim each segment. `\,` is a literal comma; `\\` is a literal backslash; any
+/// other backslash is preserved as-is so callers that don't use escapes are not
+/// surprised. Empty segments after trimming are dropped — the cardinality check
+/// in [`Filter::new`] enforces at least one value.
+///
+/// Symmetric with [`escape_in_value`] used by `From<Filter> for (String, String, String)`,
+/// so a round-trip preserves values that contain commas or backslashes.
+fn split_in_values(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some(&',') => {
+                    chars.next();
+                    current.push(',');
+                }
+                Some(&'\\') => {
+                    chars.next();
+                    current.push('\\');
+                }
+                _ => current.push('\\'),
+            }
+        } else if c == ',' {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() {
+                out.push(trimmed);
+            }
+            current.clear();
+        } else {
+            current.push(c);
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        out.push(trimmed);
+    }
+    out
+}
+
+/// Escape backslash and comma so a value can survive a round trip through the
+/// `(String, String, String)` tuple form used for `IN` / `NOT IN`.
+fn escape_in_value(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for c in v.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            ',' => out.push_str("\\,"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 pub fn from_str_tuples<I, S>(tuples: I) -> Result<Vec<Filter>>
@@ -101,6 +162,63 @@ where
         .into_iter()
         .map(|t| Filter::try_from((t.0.as_ref(), t.1.as_ref(), t.2.as_ref())))
         .collect()
+}
+
+/// Evaluate a slice of [`Filter`]s against a [`RecordBatch`] and return a row-level mask
+/// where `true` indicates the row should be retained.
+///
+/// This is a low-level primitive: filters whose field is not present in the batch are
+/// skipped silently. Callers that want strict-on-unknown-column behavior must call
+/// [`validate_fields_against_schemas`] before invoking this function (this is what
+/// the file-group reader paths do).
+///
+/// All applicable filters are evaluated as row-level predicates and ANDed together.
+pub fn filters_to_row_mask(
+    filters: &[Filter],
+    batch: &arrow_array::RecordBatch,
+) -> Result<BooleanArray> {
+    let num_rows = batch.num_rows();
+    let mut mask: Option<BooleanArray> = None;
+    for filter in filters {
+        let Some(column) = batch.column_by_name(&filter.field) else {
+            continue;
+        };
+        let schemable = SchemableFilter::try_from((filter.clone(), batch.schema().as_ref()))?;
+        let column_mask = schemable.apply_comparison(column)?;
+        mask = Some(match mask {
+            Some(prev) => boolean::and(&prev, &column_mask)?,
+            None => column_mask,
+        });
+    }
+    Ok(mask.unwrap_or_else(|| BooleanArray::from(vec![true; num_rows])))
+}
+
+/// Error if any [`Filter`] targets a column not present in any of the provided schemas.
+///
+/// This is the strict counterpart to [`filters_to_row_mask`], which silently skips
+/// missing columns. Pass one schema for the file-group-reader case (validate against
+/// the read batch). Pass multiple — e.g. data schema + partition schema — at the
+/// table layer, where partition columns may be valid filter targets even when not
+/// physically present in the data schema. Failing fast prevents typos like
+/// `("rder_id", "=", "x")` from becoming silent no-ops.
+pub fn validate_fields_against_schemas<'a, I>(filters: &[Filter], schemas: I) -> Result<()>
+where
+    I: IntoIterator<Item = &'a Schema>,
+{
+    use std::collections::HashSet;
+    let mut valid: HashSet<&str> = HashSet::new();
+    for schema in schemas {
+        valid.extend(schema.fields().iter().map(|f| f.name().as_str()));
+    }
+    for filter in filters {
+        if !valid.contains(filter.field.as_str()) {
+            return Err(CoreError::Schema(format!(
+                "Filter field '{}' not found in schema",
+                filter.field
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub struct FilterField {
@@ -118,7 +236,7 @@ impl FilterField {
 
     pub fn eq(&self, value: impl Into<String>) -> Filter {
         Filter {
-            field_name: self.name.clone(),
+            field: self.name.clone(),
             operator: ExprOperator::Eq,
             values: vec![value.into()],
         }
@@ -126,7 +244,7 @@ impl FilterField {
 
     pub fn ne(&self, value: impl Into<String>) -> Filter {
         Filter {
-            field_name: self.name.clone(),
+            field: self.name.clone(),
             operator: ExprOperator::Ne,
             values: vec![value.into()],
         }
@@ -134,7 +252,7 @@ impl FilterField {
 
     pub fn lt(&self, value: impl Into<String>) -> Filter {
         Filter {
-            field_name: self.name.clone(),
+            field: self.name.clone(),
             operator: ExprOperator::Lt,
             values: vec![value.into()],
         }
@@ -142,7 +260,7 @@ impl FilterField {
 
     pub fn lte(&self, value: impl Into<String>) -> Filter {
         Filter {
-            field_name: self.name.clone(),
+            field: self.name.clone(),
             operator: ExprOperator::Lte,
             values: vec![value.into()],
         }
@@ -150,7 +268,7 @@ impl FilterField {
 
     pub fn gt(&self, value: impl Into<String>) -> Filter {
         Filter {
-            field_name: self.name.clone(),
+            field: self.name.clone(),
             operator: ExprOperator::Gt,
             values: vec![value.into()],
         }
@@ -158,7 +276,7 @@ impl FilterField {
 
     pub fn gte(&self, value: impl Into<String>) -> Filter {
         Filter {
-            field_name: self.name.clone(),
+            field: self.name.clone(),
             operator: ExprOperator::Gte,
             values: vec![value.into()],
         }
@@ -170,7 +288,7 @@ impl FilterField {
         S: Into<String>,
     {
         Filter {
-            field_name: self.name.clone(),
+            field: self.name.clone(),
             operator: ExprOperator::In,
             values: values.into_iter().map(|v| v.into()).collect(),
         }
@@ -182,7 +300,7 @@ impl FilterField {
         S: Into<String>,
     {
         Filter {
-            field_name: self.name.clone(),
+            field: self.name.clone(),
             operator: ExprOperator::NotIn,
             values: values.into_iter().map(|v| v.into()).collect(),
         }
@@ -204,25 +322,21 @@ impl TryFrom<(Filter, &Schema)> for SchemableFilter {
     type Error = CoreError;
 
     fn try_from((filter, schema): (Filter, &Schema)) -> Result<Self, Self::Error> {
-        let field_name = filter.field_name.clone();
-        let field: &Field = schema.field_with_name(&field_name).map_err(|e| {
+        let field_name = filter.field.as_str();
+        let arrow_field = schema.field_with_name(field_name).map_err(|e| {
             CoreError::Schema(format!("Field {field_name} not found in schema: {e:?}"))
         })?;
-
-        let operator = filter.operator;
 
         let values: Result<Vec<_>> = filter
             .values
             .iter()
-            .map(|v| Self::cast_value(&[v.as_str()], field.data_type()))
+            .map(|v| Self::cast_value(&[v.as_str()], arrow_field.data_type()))
             .collect();
-        let values = values?;
 
-        let field = field.clone();
         Ok(SchemableFilter {
-            field,
-            operator,
-            values,
+            field: arrow_field.clone(),
+            operator: filter.operator,
+            values: values?,
         })
     }
 }
@@ -276,8 +390,9 @@ impl SchemableFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{Int64Array, StringArray};
+    use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
     use arrow_schema::{DataType, Field, Schema};
+    use std::sync::Arc;
 
     fn create_test_schema() -> Schema {
         Schema::new(vec![
@@ -287,41 +402,129 @@ mod tests {
     }
 
     #[test]
-    fn test_schemable_filter_try_from() -> Result<()> {
+    fn test_filters_to_row_mask_combines_filters_with_and() -> Result<()> {
+        let schema = Arc::new(create_test_schema());
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "a"])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let filters = vec![
+            Filter::try_from(("string_col", "=", "a"))?,
+            Filter::try_from(("int_col", ">", "1"))?,
+        ];
+        let mask = filters_to_row_mask(&filters, &batch)?;
+        assert_eq!(mask, BooleanArray::from(vec![false, false, true]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_filters_to_row_mask_skips_missing_columns() -> Result<()> {
+        let schema = Arc::new(create_test_schema());
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b"])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let filters = vec![
+            Filter::try_from(("not_in_batch", "=", "x"))?,
+            Filter::try_from(("string_col", "=", "a"))?,
+        ];
+        let mask = filters_to_row_mask(&filters, &batch)?;
+        assert_eq!(mask, BooleanArray::from(vec![true, false]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_fields_against_schemas() -> Result<()> {
         let schema = create_test_schema();
 
-        // Test string column filter creation
-        let string_filter = Filter {
-            field_name: "string_col".to_string(),
-            operator: ExprOperator::Eq,
-            values: vec!["test_value".to_string()],
-        };
+        // Empty filter list passes (single-schema form).
+        assert!(validate_fields_against_schemas(&[], [&schema]).is_ok());
 
-        let schemable = SchemableFilter::try_from((string_filter, &schema))?;
+        // All-known fields pass.
+        let valid = vec![
+            Filter::try_from(("string_col", "=", "x"))?,
+            Filter::try_from(("int_col", ">", "1"))?,
+        ];
+        assert!(validate_fields_against_schemas(&valid, [&schema]).is_ok());
+
+        // Unknown field errors with a Schema error naming the bad column.
+        let invalid = vec![
+            Filter::try_from(("string_col", "=", "x"))?,
+            Filter::try_from(("typo_col", "=", "y"))?,
+        ];
+        let err = validate_fields_against_schemas(&invalid, [&schema]).unwrap_err();
+        assert!(matches!(err, CoreError::Schema(_)));
+        assert!(err.to_string().contains("typo_col"));
+
+        // Multi-schema: a filter on a column present in only one of the schemas
+        // passes when the union is considered. This mirrors the Table-layer use case
+        // where partition fields may not be in the data schema but are still valid
+        // filter targets.
+        let partition_schema = Schema::new(vec![Field::new("city", DataType::Utf8, false)]);
+        let cross_schema_filters = vec![
+            Filter::try_from(("string_col", "=", "x"))?, // in data schema only
+            Filter::try_from(("city", "=", "sf"))?,      // in partition schema only
+        ];
+        assert!(
+            validate_fields_against_schemas(&cross_schema_filters, [&schema, &partition_schema])
+                .is_ok()
+        );
+
+        // A filter on a column missing from BOTH schemas still errors.
+        let still_invalid = vec![Filter::try_from(("nope", "=", "x"))?];
+        let err = validate_fields_against_schemas(&still_invalid, [&schema, &partition_schema])
+            .unwrap_err();
+        assert!(err.to_string().contains("nope"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filters_to_row_mask_empty_returns_all_true() -> Result<()> {
+        let schema = Arc::new(create_test_schema());
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b"])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let mask = filters_to_row_mask(&[], &batch)?;
+        assert_eq!(mask, BooleanArray::from(vec![true, true]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_schemable_filter_try_from_schema_lookup() -> Result<()> {
+        let schema = create_test_schema();
+
+        // Happy path: looks up the field, copies operator, casts values.
+        let filter = Filter::new(
+            "string_col".to_string(),
+            ExprOperator::Eq,
+            vec!["test_value".to_string()],
+        )?;
+        let schemable = SchemableFilter::try_from((filter, &schema))?;
         assert_eq!(schemable.field.name(), "string_col");
         assert_eq!(schemable.field.data_type(), &DataType::Utf8);
         assert_eq!(schemable.operator, ExprOperator::Eq);
 
-        // Test integer column filter creation
-        let int_filter = Filter {
-            field_name: "int_col".to_string(),
-            operator: ExprOperator::Gt,
-            values: vec!["42".to_string()],
-        };
-
-        let schemable = SchemableFilter::try_from((int_filter, &schema))?;
-        assert_eq!(schemable.field.name(), "int_col");
-        assert_eq!(schemable.field.data_type(), &DataType::Int64);
-        assert_eq!(schemable.operator, ExprOperator::Gt);
-
-        // Test error case - non-existent column
-        let invalid_filter = Filter {
-            field_name: "non_existent".to_string(),
-            operator: ExprOperator::Eq,
-            values: vec!["value".to_string()],
-        };
-
-        assert!(SchemableFilter::try_from((invalid_filter, &schema)).is_err());
+        // Error path: unknown column.
+        let invalid = Filter::new(
+            "non_existent".to_string(),
+            ExprOperator::Eq,
+            vec!["value".to_string()],
+        )?;
+        assert!(SchemableFilter::try_from((invalid, &schema)).is_err());
 
         Ok(())
     }
@@ -369,122 +572,111 @@ mod tests {
     }
 
     #[test]
-    fn test_schemable_filter_apply_comparison() -> Result<()> {
+    fn test_schemable_filter_apply_comparison_all_operators() -> Result<()> {
+        // Single parameterized test covering all 8 operators across both a string
+        // column ("a", "b", "a") and an int column (40, 50, 60). Verifies the
+        // dispatch in `apply_comparison` and that the per-operator kernels are
+        // wired correctly. Single-value ops use `Vec::from([v])`; set ops use
+        // multi-value vectors.
         let schema = create_test_schema();
+        let string_array = StringArray::from(vec!["a", "b", "a"]);
+        let int_array = Int64Array::from(vec![40, 50, 60]);
 
-        // Test string equality comparison
-        let eq_filter = Filter {
-            field_name: "string_col".to_string(),
-            operator: ExprOperator::Eq,
-            values: vec!["test".to_string()],
-        };
-        let schemable = SchemableFilter::try_from((eq_filter, &schema))?;
-
-        let test_array = StringArray::from(vec!["test", "other", "test"]);
-        let result = schemable.apply_comparison(&test_array)?;
-        assert_eq!(result, BooleanArray::from(vec![true, false, true]));
-
-        // Test integer greater than comparison
-        let gt_filter = Filter {
-            field_name: "int_col".to_string(),
-            operator: ExprOperator::Gt,
-            values: vec!["50".to_string()],
-        };
-        let schemable = SchemableFilter::try_from((gt_filter, &schema))?;
-
-        let test_array = Int64Array::from(vec![40, 50, 60]);
-        let result = schemable.apply_comparison(&test_array)?;
-        assert_eq!(result, BooleanArray::from(vec![false, false, true]));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_schemable_filter_all_operators() -> Result<()> {
-        let schema = create_test_schema();
-        let test_array = Int64Array::from(vec![40, 50, 60]);
-
-        let test_cases = vec![
-            (ExprOperator::Eq, "50", vec![false, true, false]),
-            (ExprOperator::Ne, "50", vec![true, false, true]),
-            (ExprOperator::Lt, "50", vec![true, false, false]),
-            (ExprOperator::Lte, "50", vec![true, true, false]),
-            (ExprOperator::Gt, "50", vec![false, false, true]),
-            (ExprOperator::Gte, "50", vec![false, true, true]),
+        let cases: Vec<(&str, Vec<&str>, ExprOperator, Vec<bool>)> = vec![
+            // String column
+            (
+                "string_col",
+                vec!["a"],
+                ExprOperator::Eq,
+                vec![true, false, true],
+            ),
+            (
+                "string_col",
+                vec!["a"],
+                ExprOperator::Ne,
+                vec![false, true, false],
+            ),
+            (
+                "string_col",
+                vec!["a", "b"],
+                ExprOperator::In,
+                vec![true, true, true],
+            ),
+            (
+                "string_col",
+                vec!["a", "b"],
+                ExprOperator::NotIn,
+                vec![false, false, false],
+            ),
+            // Int column — covers all 6 binary operators + 2 set operators
+            (
+                "int_col",
+                vec!["50"],
+                ExprOperator::Eq,
+                vec![false, true, false],
+            ),
+            (
+                "int_col",
+                vec!["50"],
+                ExprOperator::Ne,
+                vec![true, false, true],
+            ),
+            (
+                "int_col",
+                vec!["50"],
+                ExprOperator::Lt,
+                vec![true, false, false],
+            ),
+            (
+                "int_col",
+                vec!["50"],
+                ExprOperator::Lte,
+                vec![true, true, false],
+            ),
+            (
+                "int_col",
+                vec!["50"],
+                ExprOperator::Gt,
+                vec![false, false, true],
+            ),
+            (
+                "int_col",
+                vec!["50"],
+                ExprOperator::Gte,
+                vec![false, true, true],
+            ),
+            (
+                "int_col",
+                vec!["40", "60"],
+                ExprOperator::In,
+                vec![true, false, true],
+            ),
+            (
+                "int_col",
+                vec!["40", "60"],
+                ExprOperator::NotIn,
+                vec![false, true, false],
+            ),
         ];
 
-        for (operator, value, expected) in test_cases {
-            let filter = Filter {
-                field_name: "int_col".to_string(),
+        for (column, values, operator, expected) in cases {
+            let filter = Filter::new(
+                column.to_string(),
                 operator,
-                values: vec![value.to_string()],
-            };
-
+                values.iter().map(|s| s.to_string()).collect(),
+            )?;
             let schemable = SchemableFilter::try_from((filter, &schema))?;
-            let result = schemable.apply_comparison(&test_array)?;
+            let result = match column {
+                "string_col" => schemable.apply_comparison(&string_array)?,
+                "int_col" => schemable.apply_comparison(&int_array)?,
+                other => unreachable!("unexpected column {other}"),
+            };
             assert_eq!(
                 result,
                 BooleanArray::from(expected),
-                "Failed for operator {operator:?} with value {value}"
+                "operator {operator:?} on {column} with {values:?}"
             );
         }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_schemable_filter_in() -> Result<()> {
-        let schema = create_test_schema();
-
-        let in_filter = Filter::new(
-            "string_col".to_string(),
-            ExprOperator::In,
-            vec!["foo".to_string(), "bar".to_string()],
-        )
-        .unwrap();
-
-        let schemable = SchemableFilter::try_from((in_filter, &schema))?;
-        let test_array = StringArray::from(vec!["foo", "baz", "bar", "qux"]);
-        let result = schemable.apply_comparison(&test_array)?;
-        assert_eq!(result, BooleanArray::from(vec![true, false, true, false]));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_schemable_filter_not_in() -> Result<()> {
-        let schema = create_test_schema();
-
-        let not_in_filter = Filter::new(
-            "string_col".to_string(),
-            ExprOperator::NotIn,
-            vec!["foo".to_string(), "bar".to_string()],
-        )
-        .unwrap();
-
-        let schemable = SchemableFilter::try_from((not_in_filter, &schema))?;
-        let test_array = StringArray::from(vec!["foo", "baz", "bar", "qux"]);
-        let result = schemable.apply_comparison(&test_array)?;
-        assert_eq!(result, BooleanArray::from(vec![false, true, false, true]));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_schemable_filter_in_with_integers() -> Result<()> {
-        let schema = create_test_schema();
-
-        let in_filter = Filter::new(
-            "int_col".to_string(),
-            ExprOperator::In,
-            vec!["40".to_string(), "60".to_string()],
-        )
-        .unwrap();
-
-        let schemable = SchemableFilter::try_from((in_filter, &schema))?;
-        let test_array = Int64Array::from(vec![40, 50, 60]);
-        let result = schemable.apply_comparison(&test_array)?;
-        assert_eq!(result, BooleanArray::from(vec![true, false, true]));
 
         Ok(())
     }
@@ -510,7 +702,7 @@ mod tests {
 
     #[test]
     fn test_filter_roundtrip_in_operator() -> Result<()> {
-        // Round-trip: Filter -> (String, String, String) -> Filter
+        // Round-trip plain values (no escape needed).
         let original = Filter::new(
             "col".to_string(),
             ExprOperator::In,
@@ -528,6 +720,77 @@ mod tests {
         assert_eq!(restored.operator, ExprOperator::In);
         assert_eq!(restored.values, vec!["a", "b"]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_in_value_comma_escape_parses_literal_comma() -> Result<()> {
+        // `\,` is a literal comma; `,` is a separator.
+        let filter = Filter::try_from(("name", "IN", "Smith\\, John,Jane"))?;
+        assert_eq!(filter.operator, ExprOperator::In);
+        assert_eq!(filter.values, vec!["Smith, John", "Jane"]);
+
+        // `\\` is a literal backslash; non-special escapes are preserved as `\`.
+        let filter = Filter::try_from(("name", "IN", "a\\\\b,c\\d"))?;
+        assert_eq!(filter.values, vec!["a\\b", "c\\d"]);
+
+        // Trailing escape with no following char is preserved as a literal `\`.
+        let filter = Filter::try_from(("name", "IN", "x\\"))?;
+        assert_eq!(filter.values, vec!["x\\"]);
+
+        // Empty segments after trim are dropped; a fully empty value still errors via cardinality.
+        let filter = Filter::try_from(("name", "IN", "a,,b"))?;
+        assert_eq!(filter.values, vec!["a", "b"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_roundtrip_in_value_with_special_chars() -> Result<()> {
+        // Filter values containing commas and backslashes must round-trip
+        // through the (String, String, String) tuple form.
+        let original = Filter::new(
+            "name".to_string(),
+            ExprOperator::In,
+            vec!["Smith, John".to_string(), "back\\slash".to_string()],
+        )?;
+        let tuple: (String, String, String) = original.into();
+        assert_eq!(
+            tuple,
+            (
+                "name".to_string(),
+                "IN".to_string(),
+                "Smith\\, John,back\\\\slash".to_string()
+            )
+        );
+        let restored = Filter::try_from((tuple.0.as_str(), tuple.1.as_str(), tuple.2.as_str()))?;
+        assert_eq!(restored.values, vec!["Smith, John", "back\\slash"]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_roundtrip_scalar_with_special_chars() -> Result<()> {
+        // Scalar operators must not escape commas or backslashes because the
+        // parser does not unescape them for non-IN operators.
+        for op in [
+            ExprOperator::Eq,
+            ExprOperator::Ne,
+            ExprOperator::Lt,
+            ExprOperator::Lte,
+            ExprOperator::Gt,
+            ExprOperator::Gte,
+        ] {
+            let original = Filter::new("city".to_string(), op, vec!["a,b\\c".to_string()])?;
+            let tuple: (String, String, String) = original.into();
+            assert_eq!(tuple.2, "a,b\\c", "operator {op:?} should not escape");
+            let restored =
+                Filter::try_from((tuple.0.as_str(), tuple.1.as_str(), tuple.2.as_str()))?;
+            assert_eq!(
+                restored.values,
+                vec!["a,b\\c"],
+                "operator {op:?} round-trip"
+            );
+        }
         Ok(())
     }
 }

@@ -23,6 +23,7 @@ use cxx::{CxxString, CxxVector};
 use hudi::file_group::FileGroup;
 use hudi::file_group::file_slice::FileSlice;
 use hudi::file_group::reader::FileGroupReader;
+use hudi::table::ReadOptions;
 
 #[cxx::bridge]
 mod ffi {
@@ -46,9 +47,10 @@ mod ffi {
             log_file_names: &CxxVector<CxxString>,
         ) -> Result<Box<HudiFileSlice>>;
 
-        fn read_file_slice_by_base_file_path(
+        fn read_file_slice_from_paths(
             self: &HudiFileGroupReader,
-            relative_path: &CxxString,
+            base_file_path: &CxxString,
+            log_file_paths: &CxxVector<CxxString>,
         ) -> Result<*mut ArrowArrayStream>;
 
         fn read_file_slice(
@@ -92,17 +94,31 @@ pub fn new_file_group_reader_with_options(
 }
 
 impl HudiFileGroupReader {
-    pub fn read_file_slice_by_base_file_path(
+    pub fn read_file_slice_from_paths(
         &self,
-        relative_path: &CxxString,
+        base_file_path: &CxxString,
+        log_file_paths: &CxxVector<CxxString>,
     ) -> std::result::Result<*mut ffi::ArrowArrayStream, String> {
-        let relative_path = relative_path
+        let base_file_path = base_file_path
             .to_str()
             .map_err(|e| format!("Failed to convert CxxString to str: {e}"))?;
 
+        let log_file_paths = log_file_paths
+            .iter()
+            .map(|p| {
+                p.to_str()
+                    .map(String::from)
+                    .map_err(|e| format!("Failed to convert CxxString to str: {e}"))
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
         let record_batch = self
             .rt
-            .block_on(self.inner.read_file_slice_by_base_file_path(relative_path))
+            .block_on(self.inner.read_file_slice_from_paths(
+                base_file_path,
+                log_file_paths,
+                &ReadOptions::new(),
+            ))
             .map_err(|e| format!("Failed to read file batch: {e}"))?;
         let schema = record_batch.schema();
 
@@ -118,7 +134,10 @@ impl HudiFileGroupReader {
     ) -> std::result::Result<*mut ffi::ArrowArrayStream, String> {
         let record_batch = self
             .rt
-            .block_on(self.inner.read_file_slice(&file_slice.inner))
+            .block_on(
+                self.inner
+                    .read_file_slice(&file_slice.inner, &ReadOptions::new()),
+            )
             .map_err(|e| format!("Failed to read file slice: {e}"))?;
         let schema = record_batch.schema();
 

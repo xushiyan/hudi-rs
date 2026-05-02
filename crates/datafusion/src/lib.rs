@@ -51,7 +51,7 @@ use hudi_core::config::read::HudiReadConfig::{InputPartitions, UseReadOptimizedM
 use hudi_core::config::table::{BaseFileFormatValue, HudiTableConfig};
 use hudi_core::config::util::empty_options;
 use hudi_core::storage::util::{get_scheme_authority, join_url_segments};
-use hudi_core::table::Table as HudiTable;
+use hudi_core::table::{ReadOptions, Table as HudiTable};
 
 /// Create a `HudiDataSource`.
 /// Used for Datafusion to query Hudi tables
@@ -371,11 +371,16 @@ impl TableProvider for HudiDataSource {
             .cloned()
             .collect();
         let pushdown_filters = exprs_to_filters(&partition_filters);
-        let file_slices = self
+        let read_options = ReadOptions::new()
+            .with_filters(pushdown_filters)
+            .map_err(|e| Execution(format!("Invalid pushdown filter: {e}")))?;
+        let flat_slices = self
             .table
-            .get_file_slices_splits(input_partitions, pushdown_filters)
+            .get_file_slices(&read_options)
             .await
             .map_err(|e| Execution(format!("Failed to get file slices from Hudi table: {e}")))?;
+        let file_slices =
+            hudi_core::util::collection::split_into_chunks(flat_slices, input_partitions);
         let base_url = self.table.base_url();
         let mut parquet_file_groups: Vec<Vec<PartitionedFile>> = Vec::new();
         for file_slice_vec in file_slices {
