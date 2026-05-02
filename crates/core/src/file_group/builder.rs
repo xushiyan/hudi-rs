@@ -146,13 +146,16 @@ pub(crate) fn file_groups_from_commit_metadata_with_estimator<V: CompletionTimeV
 
         // Log files are only present in MOR write stats (the `baseFile` branch).
         // When `fileSizeInBytes` describes a log file (not the base file), attach
-        // its size to the matching LogFile entry.
-        let log_file_size_from_stat: Option<(Option<&str>, u64)> =
+        // its size and record count to the matching LogFile entry.
+        let log_metadata_from_stat: Option<(Option<&str>, u64, i64)> =
             if !write_stat_size_is_for_base_file {
                 write_stat
                     .file_size_in_bytes
                     .filter(|s| *s > 0)
-                    .map(|s| (path_file_name, s as u64))
+                    .map(|s| {
+                        let num_records = write_stat.num_writes.unwrap_or(0);
+                        (path_file_name, s as u64, num_records)
+                    })
             } else {
                 None
             };
@@ -162,10 +165,14 @@ pub(crate) fn file_groups_from_commit_metadata_with_estimator<V: CompletionTimeV
                 for log_file_name in log_file_names {
                     let mut log_file = LogFile::from_str(log_file_name)?;
                     log_file.set_completion_time(completion_time_view);
-                    if let Some((Some(stat_name), size)) = log_file_size_from_stat {
+                    if let Some((Some(stat_name), size, num_records)) = log_metadata_from_stat {
                         if stat_name == log_file_name.as_str() {
-                            log_file.file_metadata =
-                                Some(FileMetadata::new(log_file_name.clone(), size));
+                            log_file.file_metadata = Some(FileMetadata {
+                                name: log_file_name.clone(),
+                                size,
+                                byte_size: 0,
+                                num_records,
+                            });
                         }
                     }
                     file_group.add_log_file(log_file)?;

@@ -882,8 +882,12 @@ impl Table {
     /// computed.
     pub async fn compute_table_stats(&self, options: Option<&ReadOptions>) -> Option<(u64, u64)> {
         if let Some(opts) = options {
-            if opts.query_type().ok() == Some(QueryType::Incremental) {
-                return self.compute_change_stats_inner(opts).await.ok();
+            match opts.query_type() {
+                Ok(QueryType::Incremental) => {
+                    return self.compute_change_stats_inner(opts).await.ok();
+                }
+                Ok(QueryType::Snapshot) => {}
+                Err(_) => return None,
             }
         }
 
