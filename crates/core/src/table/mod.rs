@@ -1966,6 +1966,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_compute_table_stats_incremental() {
+        let base_url = SampleTable::V6SimplekeygenNonhivestyleOverwritetable.url_to_mor_parquet();
+        let table = Table::new(base_url.path()).await.unwrap();
+
+        let options = ReadOptions::new()
+            .with_query_type(QueryType::Incremental)
+            .with_end_timestamp("20250121000656060");
+        let stats = table.compute_table_stats(Some(&options)).await;
+        assert!(
+            stats.is_some(),
+            "Incremental stats should be Some when changes exist"
+        );
+        let (rows, bytes) = stats.unwrap();
+        assert!(rows > 0, "Should have rows > 0, got {rows}");
+        assert!(bytes > 0, "Should have bytes > 0, got {bytes}");
+    }
+
+    #[tokio::test]
     async fn test_clone_table_with_mdt() {
         let base_url = SampleTable::V9TxnsNonpartMeta.url_to_mor_avro();
         let table = Table::new(base_url.path()).await.unwrap();
