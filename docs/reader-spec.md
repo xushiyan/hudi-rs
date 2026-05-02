@@ -123,7 +123,7 @@ All public symbols are re-exported from the `hudi` crate.
 | `create_file_group_reader_with_options(read_options, extra_hudi_overrides, extra_storage_overrides)` | `Result<FileGroupReader>`                            |
 | `read(&ReadOptions)`                                                       | `Result<Vec<RecordBatch>>` (dispatches on `query_type`) |
 | `read_stream(&ReadOptions)`                                                | `Result<BoxStream<'static, Result<RecordBatch>>>` (errors on `Incremental`) |
-| `compute_table_stats()`                                                    | `Option<(u64, u64)>` — `(rows, byte_size)`           |
+| `compute_table_stats(Option<&ReadOptions>)`                                | `Option<(u64, u64)>` — `(rows, byte_size)`; see §7   |
 
 ### `FileGroupReader`
 
@@ -217,7 +217,7 @@ table = (
 | `create_file_group_reader_with_options(read_options=None, extra_hudi_overrides=None, extra_storage_overrides=None)` | `HudiFileGroupReader`                    |
 | `read(options=None)`                                                                               | `List[pyarrow.RecordBatch]` (dispatches on `query_type`) |
 | `read_stream(options=None)`                                                                        | `HudiRecordBatchStream` (errors on `Incremental`) |
-| `compute_table_stats()`                                                                            | `Optional[Tuple[int, int]]`              |
+| `compute_table_stats(options=None)`                                                                | `Optional[Tuple[int, int]]`; see §7      |
 
 ### `HudiFileGroupReader`
 
@@ -314,6 +314,11 @@ A table with no completed commits yields empty `Vec` / `List` for eager reads an
 
 Reader APIs documented here are the supported public surface as of this release. The `FileGroupReader` direct-paths APIs are still labeled experimental in the README; expect minor signature evolution before they finalize.
 
-`compute_table_stats()` returns `None` when statistics cannot be computed (no metadata table, non-Parquet base files, or footer reads fail). It does not yet account for log files in MOR tables, so estimates skew low for write-heavy MOR workloads.
+`compute_table_stats(options)` has two paths depending on the query type carried in `options`:
+
+- **Snapshot** (`options` is `None` or `query_type == Snapshot`): derives row count and byte size from the metadata table (MDT). Returns `None` when the MDT is not enabled, the base file format is non-Parquet, or footer sampling fails. A fallback to full table file listing is intentionally omitted — scanning every file to compute planning stats would cost as much as the read itself, defeating the purpose. Tables that want snapshot stats should enable the metadata table.
+- **Incremental** (`query_type == Incremental`): aggregates `num_records` and on-disk sizes from the file slices in the `(start_timestamp, end_timestamp]` range. This does not require the MDT because the change set is typically small and `get_file_slices` already resolves those files via timeline commit metadata. Returns `None` only when the change set is empty.
+
+Snapshot estimates do not yet account for log files in MOR tables, so they skew low for write-heavy MOR workloads. Incremental estimates include both base and log file sizes via `FileSlice::total_size_bytes()`.
 
 Out of scope for this version: writer APIs, internal architecture (timeline parsing, log-record merging, metadata table layout), the full configuration key glossary (`HudiReadConfig` / `HudiTableConfig` members), and the DataFusion and C++ bindings — separate spec follow-ups.
