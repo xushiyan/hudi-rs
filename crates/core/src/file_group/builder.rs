@@ -145,11 +145,29 @@ pub(crate) fn file_groups_from_commit_metadata_with_estimator<V: CompletionTimeV
         file_group.add_base_file(base_file)?;
 
         // Log files are only present in MOR write stats (the `baseFile` branch).
+        // When `fileSizeInBytes` describes a log file (not the base file), attach
+        // its size to the matching LogFile entry.
+        let log_file_size_from_stat: Option<(Option<&str>, u64)> =
+            if !write_stat_size_is_for_base_file {
+                write_stat
+                    .file_size_in_bytes
+                    .filter(|s| *s > 0)
+                    .map(|s| (path_file_name, s as u64))
+            } else {
+                None
+            };
+
         if write_stat.base_file.is_some() {
             if let Some(log_file_names) = &write_stat.log_files {
                 for log_file_name in log_file_names {
                     let mut log_file = LogFile::from_str(log_file_name)?;
                     log_file.set_completion_time(completion_time_view);
+                    if let Some((Some(stat_name), size)) = log_file_size_from_stat {
+                        if stat_name == log_file_name.as_str() {
+                            log_file.file_metadata =
+                                Some(FileMetadata::new(log_file_name.clone(), size));
+                        }
+                    }
                     file_group.add_log_file(log_file)?;
                 }
             }
@@ -224,6 +242,10 @@ pub(crate) fn file_groups_from_files_partition_records<V: CompletionTimeView>(
                     && log_file.completion_timestamp.is_none()
                 {
                     continue;
+                }
+                if file_size > 0 {
+                    log_file.file_metadata =
+                        Some(FileMetadata::new(file_name.to_string(), file_size));
                 }
                 file_id_to_log_files
                     .entry(log_file.file_id.clone())

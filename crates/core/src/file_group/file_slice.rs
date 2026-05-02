@@ -111,9 +111,8 @@ impl FileSlice {
 
     /// Sum of base file size and all log file sizes (on-disk bytes).
     ///
-    /// Returns 0 for any file whose `file_metadata` is None (i.e., metadata
-    /// not loaded). Callers wanting accurate sizes should ensure metadata is
-    /// loaded before calling.
+    /// Files whose `file_metadata` is `None` contribute 0 to the sum.
+    /// The result may undercount when metadata has not been populated.
     #[inline]
     pub fn total_size_bytes(&self) -> u64 {
         let base = self

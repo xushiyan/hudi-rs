@@ -182,6 +182,7 @@ Available pairs: `with_hudi_option` / `with_hudi_options`, `with_storage_option`
 | `Timeline::get_latest_avro_schema()` / `get_latest_schema()`                                                  | Latest schema (Avro string / Arrow `Schema`).          |
 | `FileSlice::file_id()` / `creation_instant_time()` / `has_log_file()`                                         | Slice identity / version / MOR-with-deltas flag.       |
 | `FileSlice::base_file_relative_path()` / `log_file_relative_path(&LogFile)`                                   | Paths relative to the table base URI.                  |
+| `FileSlice::total_size_bytes()`                                                                                | Sum of base + log file on-disk sizes. Missing metadata contributes 0. |
 
 ## 5. Python API
 
@@ -269,8 +270,9 @@ A single-use iterator returned by streaming APIs. `for batch in stream:` or `nex
 | `HudiTimeline.get_latest_commit_timestamp()`                                                     | `str`                                                  |
 | `HudiTimeline.get_latest_avro_schema()` / `get_latest_schema()`                                  | `str` / `pyarrow.Schema`                               |
 | `HudiInstant` properties: `timestamp`, `action`, `state`, `epoch_mills`                          | read-only                                              |
-| `HudiFileSlice` attributes: `file_id`, `partition_path`, `creation_instant_time`, `base_file_name`, `base_file_size`, `base_file_byte_size`, `log_file_names`, `num_records` | read-only |
+| `HudiFileSlice` attributes: `file_id`, `partition_path`, `creation_instant_time`, `base_file_name`, `base_file_size`, `base_file_byte_size`, `log_file_names`, `log_file_sizes`, `num_records` | read-only |
 | `HudiFileSlice.base_file_relative_path()` / `log_files_relative_paths()`                         | `str` / `List[str]`                                    |
+| `HudiFileSlice.total_size_bytes()` / `has_log_files()`                                           | `int` / `bool`                                         |
 
 ## 6. Caller expectations
 
@@ -317,8 +319,8 @@ Reader APIs documented here are the supported public surface as of this release.
 `compute_table_stats(options)` has two paths depending on the query type carried in `options`:
 
 - **Snapshot** (`options` is `None` or `query_type == Snapshot`): derives row count and byte size from the metadata table (MDT). Returns `None` when the MDT is not enabled, the base file format is non-Parquet, or footer sampling fails. A fallback to full table file listing is intentionally omitted — scanning every file to compute planning stats would cost as much as the read itself, defeating the purpose. Tables that want snapshot stats should enable the metadata table.
-- **Incremental** (`query_type == Incremental`): aggregates `num_records` and on-disk sizes from the file slices in the `(start_timestamp, end_timestamp]` range. This does not require the MDT because the change set is typically small and `get_file_slices` already resolves those files via timeline commit metadata. Returns `None` only when the change set is empty. Note: a wide time range spanning many commits can produce a large change set; the cost is proportional to the number of file slices resolved, which is the same work `read(options)` would perform — there is no cheaper shortcut since the MDT does not index changes by time range.
+- **Incremental** (`query_type == Incremental`): aggregates `num_records` and on-disk sizes from the file slices in the `(start_timestamp, end_timestamp]` range. Both timestamps are optional — `start_timestamp` defaults to the earliest commit and `end_timestamp` defaults to the latest. This does not require the MDT because the change set is typically small and `get_file_slices` already resolves those files via timeline commit metadata. Returns `None` only when the change set is empty. Note: a wide time range spanning many commits can produce a large change set; the cost is proportional to the number of file slices resolved, which is the same work `read(options)` would perform — there is no cheaper shortcut since the MDT does not index changes by time range.
 
-Snapshot estimates do not yet account for log files in MOR tables, so they skew low for write-heavy MOR workloads. Incremental estimates include both base and log file sizes via `FileSlice::total_size_bytes()`.
+Snapshot row-count estimates are derived from a Parquet footer sample applied to base files only; log files contribute on-disk size but not row estimates, so `num_rows` may undercount for write-heavy MOR workloads. Incremental estimates include both base and log file sizes via `FileSlice::total_size_bytes()`.
 
 Out of scope for this version: writer APIs, internal architecture (timeline parsing, log-record merging, metadata table layout), the full configuration key glossary (`HudiReadConfig` / `HudiTableConfig` members), and the DataFusion and C++ bindings — separate spec follow-ups.

@@ -412,9 +412,10 @@ class HudiTable:
 
         With no options (or snapshot query type), returns snapshot stats
         (requires the metadata table to be enabled). With incremental
-        query type and timestamps set, returns aggregate stats for the
-        changes in the ``(start_timestamp, end_timestamp]`` range;
-        partition filters are honored.
+        query type, returns aggregate stats for the changes in the
+        ``(start_timestamp, end_timestamp]`` range; both timestamps
+        default to the earliest/latest commit when unset. Partition
+        filters are honored.
         """
         ...
     def read_stream(

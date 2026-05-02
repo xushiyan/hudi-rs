@@ -98,7 +98,11 @@ def test_file_slice_size_accessors_mor(v8_trips_table):
     fs = next(s for s in slices if s.log_file_names)
     assert len(fs.log_file_sizes) == len(fs.log_file_names)
     assert fs.has_log_files() is True
+    assert all(s > 0 for s in fs.log_file_sizes), (
+        f"MDT-backed log file sizes should be non-zero, got {fs.log_file_sizes}"
+    )
     assert fs.total_size_bytes() == fs.base_file_size + sum(fs.log_file_sizes)
+    assert fs.total_size_bytes() > fs.base_file_size
 
 
 def test_compute_table_stats(v8_trips_table):

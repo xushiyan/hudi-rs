@@ -871,20 +871,20 @@ impl Table {
 
     /// Compute estimated table-level statistics for scan planning.
     ///
-    /// When `options` carries `query_type == Incremental` (with `start_timestamp`
-    /// and/or `end_timestamp`), returns aggregate `(num_records, total_bytes)`
-    /// over the changed file slices in that range.
+    /// When `options` carries `query_type == Incremental`, returns aggregate
+    /// `(num_records, total_bytes)` over the changed file slices in that range.
+    /// `start_timestamp` defaults to the earliest commit and `end_timestamp`
+    /// defaults to the latest commit when unset.
     ///
-    /// Otherwise (snapshot or `None`), returns `(estimated_num_rows, estimated_total_byte_size)`
-    /// derived from the metadata table. Returns `None` if the metadata table is
-    /// not enabled or statistics cannot be computed.
+    /// Otherwise (snapshot or `None`), returns `(estimated_num_rows,
+    /// estimated_total_byte_size)` derived from the metadata table. Returns
+    /// `None` if the metadata table is not enabled or statistics cannot be
+    /// computed.
     pub async fn compute_table_stats(&self, options: Option<&ReadOptions>) -> Option<(u64, u64)> {
-        let is_incremental = options
-            .map(|o| o.query_type().ok() == Some(QueryType::Incremental))
-            .unwrap_or(false);
-
-        if is_incremental {
-            return self.compute_change_stats_inner(options.unwrap()).await.ok();
+        if let Some(opts) = options {
+            if opts.query_type().ok() == Some(QueryType::Incremental) {
+                return self.compute_change_stats_inner(opts).await.ok();
+            }
         }
 
         self.compute_snapshot_stats_inner().await
