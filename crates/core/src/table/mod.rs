@@ -869,27 +869,32 @@ impl Table {
         Ok(Box::pin(combined_stream))
     }
 
-    /// Compute estimated table-level statistics from the metadata table for scan planning.
+    /// Compute estimated table-level statistics for scan planning.
     ///
-    /// Returns `(estimated_num_rows, estimated_total_byte_size)` where byte size is the
-    /// estimated uncompressed in-memory size.
+    /// When `options` carries `query_type == Incremental` (with `start_timestamp`
+    /// and/or `end_timestamp`), returns aggregate `(num_records, total_bytes)`
+    /// over the changed file slices in that range.
     ///
-    /// The approach:
-    /// 1. Read MDT files partition to get all active base files with on-disk sizes
-    /// 2. For Parquet tables, read ONE sampled footer to derive a compression ratio
-    /// 3. Infer total rows and byte size for all base files
-    ///
-    /// Only base files are counted (log files are excluded).
-    ///
-    /// TODO: support including log files in the estimation for MOR tables for scan planning.
-    ///
-    /// Returns `None` if metadata table is not enabled or if statistics cannot be computed.
-    pub async fn compute_table_stats(&self) -> Option<(u64, u64)> {
+    /// Otherwise (snapshot or `None`), returns `(estimated_num_rows, estimated_total_byte_size)`
+    /// derived from the metadata table. Returns `None` if the metadata table is
+    /// not enabled or statistics cannot be computed.
+    pub async fn compute_table_stats(&self, options: Option<&ReadOptions>) -> Option<(u64, u64)> {
+        let is_incremental = options
+            .map(|o| o.query_type().ok() == Some(QueryType::Incremental))
+            .unwrap_or(false);
+
+        if is_incremental {
+            return self.compute_change_stats_inner(options.unwrap()).await.ok();
+        }
+
+        self.compute_snapshot_stats_inner().await
+    }
+
+    async fn compute_snapshot_stats_inner(&self) -> Option<(u64, u64)> {
         if !self.is_metadata_table_enabled() {
             return None;
         }
 
-        // Step 1: Get MDT files partition records (cached on the MDT instance).
         let partition_schema = self.get_partition_schema().await.ok()?;
         let hudi_configs = self.hudi_configs.as_ref();
         let partition_pruner = PartitionPruner::new(&[], &partition_schema, hudi_configs).ok()?;
@@ -899,7 +904,6 @@ impl Table {
             .await
             .ok()?;
 
-        // Only count base files (exclude log files which start with '.').
         let base_file_format = self.file_system_view.base_file_format();
         let base_file_suffix = format!(".{}", base_file_format.as_ref());
         let total_on_disk_size = records
@@ -914,18 +918,39 @@ impl Table {
             return None;
         }
 
-        // Step 2: Use the cached estimator (seeded from the latest commit's sample).
-        // Return None if estimator is not available (non-Parquet, no sample, or read failed).
         let latest_ts = self.timeline.get_latest_commit_timestamp().ok()?;
         let estimator = self.get_or_init_estimator(&latest_ts).await?;
         let (estimated_total_byte_size, estimated_total_rows) =
             estimator.estimate(total_on_disk_size);
-        // Estimator math is non-negative by construction (u64 size * f64 ratio).
-        // `i64 -> u64` via `max(0) as u64` defends against any future change.
         Some((
             estimated_total_rows.max(0) as u64,
             estimated_total_byte_size.max(0) as u64,
         ))
+    }
+
+    async fn compute_change_stats_inner(&self, options: &ReadOptions) -> Result<(u64, u64)> {
+        let file_slices = self.get_file_slices(options).await?;
+
+        let total_records: u64 = file_slices
+            .iter()
+            .map(|fs| {
+                let base = fs
+                    .base_file
+                    .file_metadata
+                    .as_ref()
+                    .map(|m| m.num_records as u64)
+                    .unwrap_or(0);
+                let logs: u64 = fs
+                    .log_files
+                    .iter()
+                    .filter_map(|lf| lf.file_metadata.as_ref().map(|m| m.num_records as u64))
+                    .sum();
+                base + logs
+            })
+            .sum();
+
+        let total_bytes: u64 = file_slices.iter().map(|fs| fs.total_size_bytes()).sum();
+        Ok((total_records, total_bytes))
     }
 }
 
@@ -1891,7 +1916,7 @@ mod tests {
         let table = Table::new(&table_path).await.unwrap();
         assert!(table.is_metadata_table_enabled());
 
-        let stats = table.compute_table_stats().await;
+        let stats = table.compute_table_stats(None).await;
         assert!(
             stats.is_some(),
             "Stats should be Some for MDT-enabled table"
@@ -1907,7 +1932,7 @@ mod tests {
         let table = Table::new(base_url.path()).await.unwrap();
         assert!(table.is_metadata_table_enabled());
 
-        let stats = table.compute_table_stats().await;
+        let stats = table.compute_table_stats(None).await;
         assert!(stats.is_some(), "Stats should be Some for sample MDT table");
         let (rows, bytes) = stats.unwrap();
         assert!(rows > 0);
@@ -1927,7 +1952,7 @@ mod tests {
         .await
         .unwrap();
         assert!(table.is_metadata_table_enabled());
-        assert!(table.compute_table_stats().await.is_none());
+        assert!(table.compute_table_stats(None).await.is_none());
     }
 
     #[tokio::test]
@@ -1936,7 +1961,7 @@ mod tests {
         let table = Table::new(base_url.path()).await.unwrap();
         assert!(!table.is_metadata_table_enabled());
 
-        let stats = table.compute_table_stats().await;
+        let stats = table.compute_table_stats(None).await;
         assert!(stats.is_none(), "Stats should be None for non-MDT table");
     }
 
@@ -1955,7 +1980,7 @@ mod tests {
         assert!(!file_slices.is_empty());
 
         // compute_table_stats works on cloned table
-        let stats = cloned.compute_table_stats().await;
+        let stats = cloned.compute_table_stats(None).await;
         assert!(stats.is_some());
         let (rows, bytes) = stats.unwrap();
         assert!(rows > 0);

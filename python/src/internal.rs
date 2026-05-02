@@ -504,6 +504,8 @@ pub struct HudiFileSlice {
     #[pyo3(get)]
     log_file_names: Vec<String>,
     #[pyo3(get)]
+    log_file_sizes: Vec<u64>,
+    #[pyo3(get)]
     num_records: i64,
 }
 
@@ -524,6 +526,14 @@ impl HudiFileSlice {
             .map_err(PythonError::from)?;
         Ok(path)
     }
+    fn total_size_bytes(&self) -> u64 {
+        self.base_file_size + self.log_file_sizes.iter().sum::<u64>()
+    }
+
+    fn has_log_files(&self) -> bool {
+        !self.log_file_names.is_empty()
+    }
+
     fn log_files_relative_paths(&self) -> PyResult<Vec<String>> {
         let mut paths = Vec::<String>::new();
         for name in self.log_file_names.iter() {
@@ -555,6 +565,11 @@ impl From<&FileSlice> for HudiFileSlice {
         let base_file_size = file_metadata.size;
         let base_file_byte_size = file_metadata.byte_size;
         let log_file_names = f.log_files.iter().map(|l| l.file_name()).collect();
+        let log_file_sizes = f
+            .log_files
+            .iter()
+            .map(|lf| lf.file_metadata.as_ref().map(|m| m.size).unwrap_or(0))
+            .collect();
         let num_records = file_metadata.num_records;
         HudiFileSlice {
             file_id,
@@ -564,6 +579,7 @@ impl From<&FileSlice> for HudiFileSlice {
             base_file_size,
             base_file_byte_size,
             log_file_names,
+            log_file_sizes,
             num_records,
         }
     }
@@ -764,8 +780,14 @@ impl HudiTable {
         self.inner.base_url().to_string()
     }
 
-    fn compute_table_stats(&self, py: Python) -> Option<(u64, u64)> {
-        py.detach(|| rt().block_on(self.inner.compute_table_stats()))
+    #[pyo3(signature = (options=None))]
+    fn compute_table_stats(
+        &self,
+        options: Option<HudiReadOptions>,
+        py: Python,
+    ) -> Option<(u64, u64)> {
+        let read_options = options.map(|o| o.to_inner());
+        py.detach(|| rt().block_on(self.inner.compute_table_stats(read_options.as_ref())))
     }
 
     #[pyo3(signature = (options=None))]

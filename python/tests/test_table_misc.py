@@ -81,6 +81,26 @@ def test_get_incremental_file_slices():
     assert len(slices) >= 1
 
 
+def test_file_slice_size_accessors_cow():
+    table = HudiTable(get_test_table_path("v9_txns_simple_nometa", "cow"))
+    slices = table.get_file_slices()
+    assert len(slices) > 0
+    fs = slices[0]
+    assert fs.log_file_names == []
+    assert fs.log_file_sizes == []
+    assert fs.has_log_files() is False
+    assert fs.total_size_bytes() == fs.base_file_size
+
+
+def test_file_slice_size_accessors_mor(v8_trips_table):
+    table = HudiTable(v8_trips_table)
+    slices = table.get_file_slices()
+    fs = next(s for s in slices if s.log_file_names)
+    assert len(fs.log_file_sizes) == len(fs.log_file_names)
+    assert fs.has_log_files() is True
+    assert fs.total_size_bytes() == fs.base_file_size + sum(fs.log_file_sizes)
+
+
 def test_compute_table_stats(v8_trips_table):
     table = HudiTable(v8_trips_table)
     stats = table.compute_table_stats()

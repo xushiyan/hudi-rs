@@ -161,7 +161,7 @@ impl HudiDataSource {
         // Uses MDT files partition for base-file sizes and, for Parquet tables, one
         // sampled footer to infer row counts and byte sizes without loading all file groups.
         // Falls back to None if statistics cannot be derived.
-        let cached_stats = match table.compute_table_stats().await {
+        let cached_stats = match table.compute_table_stats(None).await {
             Some((num_rows, total_byte_size)) => {
                 let num_fields = schema.fields().len();
                 // Saturate on 32-bit targets where `u64` cannot fit into `usize`;

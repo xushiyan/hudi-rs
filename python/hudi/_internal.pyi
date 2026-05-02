@@ -183,6 +183,7 @@ class HudiFileSlice:
         base_file_size (int): The on-disk size of the base file in bytes.
         base_file_byte_size (int): The in-memory size of the base file in bytes.
         log_file_names (List[str]): The names of the ordered log files.
+        log_file_sizes (List[int]): On-disk sizes of the log files, parallel to ``log_file_names``.
         num_records (int): The number of records in the file slice.
     """
 
@@ -193,8 +194,15 @@ class HudiFileSlice:
     base_file_size: int
     base_file_byte_size: int
     log_file_names: List[str]
+    log_file_sizes: List[int]
     num_records: int
 
+    def total_size_bytes(self) -> int:
+        """Sum of base file size and all log file sizes, in bytes."""
+        ...
+    def has_log_files(self) -> bool:
+        """True if this slice has at least one log file."""
+        ...
     def base_file_relative_path(self) -> str:
         """
         Returns the relative path of the base file for this file slice.
@@ -396,13 +404,17 @@ class HudiTable:
         Read records, dispatching on ``options.query_type``.
         """
         ...
-    def compute_table_stats(self) -> Optional[Tuple[int, int]]:
-        """
-        Compute estimated table-level statistics from the metadata table.
+    def compute_table_stats(
+        self,
+        options: Optional[HudiReadOptions] = None,
+    ) -> Optional[Tuple[int, int]]:
+        """Compute estimated (rows, bytes).
 
-        Returns:
-            Optional[Tuple[int, int]]: ``(estimated_num_rows, estimated_total_byte_size)``,
-            or ``None`` if the metadata table is not enabled or statistics cannot be computed.
+        With no options (or snapshot query type), returns snapshot stats
+        (requires the metadata table to be enabled). With incremental
+        query type and timestamps set, returns aggregate stats for the
+        changes in the ``(start_timestamp, end_timestamp]`` range;
+        partition filters are honored.
         """
         ...
     def read_stream(
