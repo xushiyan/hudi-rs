@@ -935,25 +935,18 @@ impl Table {
     async fn compute_change_stats_inner(&self, options: &ReadOptions) -> Result<(u64, u64)> {
         let file_slices = self.get_file_slices(options).await?;
 
+        // Record count comes from the base file only. Log file records merge
+        // into the base file record batch, so the base file count represents
+        // the file slice's output. Log-only file groups (no base file) are not
+        // yet supported and contribute 0 records.
         let total_records: u64 = file_slices
             .iter()
             .map(|fs| {
-                let base = fs
-                    .base_file
+                fs.base_file
                     .file_metadata
                     .as_ref()
                     .map(|m| m.num_records.max(0) as u64)
-                    .unwrap_or(0);
-                let logs: u64 = fs
-                    .log_files
-                    .iter()
-                    .filter_map(|lf| {
-                        lf.file_metadata
-                            .as_ref()
-                            .map(|m| m.num_records.max(0) as u64)
-                    })
-                    .sum();
-                base + logs
+                    .unwrap_or(0)
             })
             .sum();
 
