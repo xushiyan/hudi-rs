@@ -25,6 +25,7 @@ use crate::storage::Storage;
 use crate::table::Table;
 use apache_avro::schema::Schema as AvroSchema;
 use arrow_schema::{Schema, SchemaRef};
+use parquet::arrow::parquet_to_arrow_schema;
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -143,7 +144,14 @@ async fn resolve_schema_from_base_file(
     // Try to get the base file path from either 'path' or 'baseFile' field
     if let Some(path) = &first_stat.path {
         if path.ends_with(".parquet") {
-            return Ok(storage.get_parquet_file_schema(path).await?);
+            return Ok(parquet_to_arrow_schema(
+                storage
+                    .get_parquet_file_metadata(path)
+                    .await?
+                    .file_metadata()
+                    .schema_descr(),
+                None,
+            )?);
         }
     }
 
@@ -159,7 +167,14 @@ async fn resolve_schema_from_base_file(
                 "Failed to resolve the latest schema: invalid file path".to_string(),
             )
         })?;
-        return Ok(storage.get_parquet_file_schema(path).await?);
+        return Ok(parquet_to_arrow_schema(
+                storage
+                    .get_parquet_file_metadata(path)
+                    .await?
+                    .file_metadata()
+                    .schema_descr(),
+                None,
+            )?);
     }
 
     Err(CoreError::CommitMetadata(

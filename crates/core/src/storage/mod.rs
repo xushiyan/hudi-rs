@@ -190,15 +190,37 @@ impl Storage {
         Ok(FileMetadata::new(name.to_string(), meta.size))
     }
 
-    pub async fn get_parquet_file_metadata(&self, relative_path: &str) -> Result<ParquetMetaData> {
-        let (_, parquet_meta) = self.get_parquet_file_metadata_with_size(relative_path).await?;
-        Ok(parquet_meta)
-    }
-
-    async fn get_parquet_file_metadata_with_size(
+    /// Read a Parquet file's footer and return the raw metadata.
+    ///
+    /// Use [`Self::get_file_metadata_and_stats`] when you need file stats and
+    /// column statistics together. This method is for callers that only need the
+    /// raw Parquet metadata (e.g., schema resolution, estimator sampling).
+    pub async fn get_parquet_file_metadata(
         &self,
         relative_path: &str,
-    ) -> Result<(u64, ParquetMetaData)> {
+    ) -> Result<ParquetMetaData> {
+        let obj_url = join_url_segments(&self.base_url, &[relative_path])?;
+        let obj_path = ObjPath::from_url_path(obj_url.path())?;
+        let obj_store = self.object_store.clone();
+        let meta = obj_store.head(&obj_path).await?;
+        let reader = ParquetObjectReader::new(obj_store, obj_path).with_file_size(meta.size);
+        let builder = ParquetRecordBatchStreamBuilder::new(reader).await?;
+        Ok(builder.metadata().as_ref().clone())
+    }
+
+    /// Get file metadata and column statistics from a base file.
+    ///
+    /// Reads the Parquet footer in a single HEAD + range request and returns:
+    /// - [`FileMetadata`]: `size` (on-disk from HEAD), `byte_size` (uncompressed
+    ///   from row groups), `num_records` (exact from footer).
+    /// - [`StatisticsContainer`]: per-column min/max from row group stats.
+    ///
+    /// Currently supports Parquet only; other base file formats can be added.
+    pub async fn get_file_metadata_and_stats(
+        &self,
+        relative_path: &str,
+        table_schema: &arrow_schema::Schema,
+    ) -> Result<(FileMetadata, StatisticsContainer)> {
         let obj_url = join_url_segments(&self.base_url, &[relative_path])?;
         let obj_path = ObjPath::from_url_path(obj_url.path())?;
         let obj_store = self.object_store.clone();
@@ -206,25 +228,7 @@ impl Storage {
         let file_size = meta.size as u64;
         let reader = ParquetObjectReader::new(obj_store, obj_path).with_file_size(meta.size);
         let builder = ParquetRecordBatchStreamBuilder::new(reader).await?;
-        Ok((file_size, builder.metadata().as_ref().clone()))
-    }
-
-    /// Get file stats from a base file by reading its format-specific metadata.
-    ///
-    /// Returns `(FileMetadata, ParquetMetaData)` with:
-    /// - `size`: actual on-disk size from storage HEAD
-    /// - `byte_size`: uncompressed size from footer row groups
-    /// - `num_records`: exact row count from footer
-    ///
-    /// Currently supports Parquet only.
-    pub async fn get_file_stats(
-        &self,
-        relative_path: &str,
-        table_schema: &arrow_schema::Schema,
-    ) -> Result<(FileMetadata, StatisticsContainer)> {
-        let (file_size, parquet_meta) = self
-            .get_parquet_file_metadata_with_size(relative_path)
-            .await?;
+        let parquet_meta = builder.metadata().as_ref();
 
         let name = std::path::Path::new(relative_path)
             .file_name()
@@ -247,20 +251,9 @@ impl Storage {
             num_records,
         };
 
-        let col_stats = StatisticsContainer::from_parquet_metadata(&parquet_meta, table_schema);
+        let col_stats = StatisticsContainer::from_parquet_metadata(parquet_meta, table_schema);
 
         Ok((file_metadata, col_stats))
-    }
-
-    pub async fn get_parquet_file_schema(
-        &self,
-        relative_path: &str,
-    ) -> Result<arrow_schema::Schema> {
-        let parquet_meta = self.get_parquet_file_metadata(relative_path).await?;
-        Ok(parquet_to_arrow_schema(
-            parquet_meta.file_metadata().schema_descr(),
-            None,
-        )?)
     }
 
     pub async fn get_file_data(&self, relative_path: &str) -> Result<Bytes> {

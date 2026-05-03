@@ -203,7 +203,7 @@ impl FileSystemView {
 
                 let (file_metadata, col_stats) = match self
                     .storage
-                    .get_file_stats(&relative_path, table_schema)
+                    .get_file_metadata_and_stats(&relative_path, table_schema)
                     .await
                 {
                     Ok(result) => result,
