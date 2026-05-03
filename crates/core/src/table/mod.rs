@@ -626,15 +626,9 @@ impl Table {
         K2: AsRef<str>,
         V2: Into<String>,
     {
-        let mut hudi_opts: HashMap<String, String> = HashMap::new();
-        if let Some(opts) = read_options {
-            for (k, v) in &opts.hudi_options {
-                if Self::TABLE_OWNED_READ_KEYS.contains(&k.as_str()) {
-                    continue;
-                }
-                hudi_opts.insert(k.clone(), v.clone());
-            }
-        }
+        let mut hudi_opts: HashMap<String, String> = read_options
+            .map(|opts| opts.hudi_options.clone())
+            .unwrap_or_default();
         for (k, v) in extra_hudi_overrides {
             hudi_opts.insert(k.as_ref().to_string(), v.into());
         }
@@ -650,17 +644,6 @@ impl Table {
 
         FileGroupReader::new_with_overrides(self.hudi_configs.clone(), hudi_opts, storage_opts)
     }
-
-    /// Read-option keys the `Table` layer interprets directly. These are
-    /// excluded from the per-read overrides forwarded to the FG reader so a
-    /// stale value can't change physical-read behavior — see
-    /// [`Self::create_file_group_reader_with_options`].
-    const TABLE_OWNED_READ_KEYS: [&'static str; 4] = [
-        HudiReadConfig::QueryType.key_str(),
-        HudiReadConfig::AsOfTimestamp.key_str(),
-        HudiReadConfig::StartTimestamp.key_str(),
-        HudiReadConfig::EndTimestamp.key_str(),
-    ];
 
     /// Read records, dispatching on `options.query_type`.
     ///
