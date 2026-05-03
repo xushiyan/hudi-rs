@@ -31,8 +31,11 @@ use url::Url;
 pub mod error;
 pub mod internal;
 pub mod read;
+pub mod read_options;
 pub mod table;
 pub mod util;
+
+pub use read_options::{QueryType, ReadOptions};
 
 pub const HUDI_CONF_DIR: &str = "HUDI_CONF_DIR";
 

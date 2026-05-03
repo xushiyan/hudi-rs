@@ -91,10 +91,9 @@ pub mod file_pruner;
 pub(crate) mod fs_view;
 mod listing;
 pub mod partition;
-mod read_options;
 mod validation;
 
-pub use read_options::{QueryType, ReadOptions};
+pub use crate::config::read_options::{QueryType, ReadOptions};
 
 use crate::Result;
 use crate::config::HudiConfigs;
