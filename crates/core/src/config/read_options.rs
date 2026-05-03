@@ -21,6 +21,8 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
+use strum::IntoEnumIterator;
+
 use crate::config::HudiConfigs;
 use crate::config::error::ConfigError;
 use crate::config::read::HudiReadConfig;
@@ -253,26 +255,24 @@ impl ReadOptions {
     /// Fill in defaults from the given configs for keys not already set.
     ///
     /// Values already present in this `ReadOptions` take precedence.
-    /// Applicable configs: `UseReadOptimizedMode`, `StreamBatchSize`.
+    /// Table-owned keys (`QueryType`, `AsOfTimestamp`, `StartTimestamp`,
+    /// `EndTimestamp`) are excluded — those are resolved by the `Table`
+    /// dispatch layer, not imbued as defaults.
     pub fn with_defaults_from(&self, configs: &HudiConfigs) -> Self {
+        use HudiReadConfig::*;
         let mut resolved = self.clone();
-        let ro_key = HudiReadConfig::UseReadOptimizedMode.as_ref();
-        if !resolved.hudi_options.contains_key(ro_key) {
-            let v: bool = configs
-                .get_or_default(HudiReadConfig::UseReadOptimizedMode)
-                .into();
-            resolved
-                .hudi_options
-                .insert(ro_key.to_string(), v.to_string());
-        }
-        let bs_key = HudiReadConfig::StreamBatchSize.as_ref();
-        if !resolved.hudi_options.contains_key(bs_key) {
-            let v: usize = configs
-                .get_or_default(HudiReadConfig::StreamBatchSize)
-                .into();
-            resolved
-                .hudi_options
-                .insert(bs_key.to_string(), v.to_string());
+        for key in HudiReadConfig::iter() {
+            match key {
+                QueryType | AsOfTimestamp | StartTimestamp | EndTimestamp => continue,
+                _ => {}
+            }
+            let key_str = key.key_str();
+            if !resolved.hudi_options.contains_key(key_str) {
+                if let Some(val) = configs.try_get(key) {
+                    let s: String = val.into();
+                    resolved.hudi_options.insert(key_str.to_string(), s);
+                }
+            }
         }
         resolved
     }
