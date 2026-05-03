@@ -109,10 +109,14 @@ impl FileSlice {
         &self.base_file.commit_timestamp
     }
 
-    /// Sum of base file size and all log file sizes (on-disk bytes).
+    /// Total on-disk size of the file slice (base file + all log files), in bytes.
+    ///
+    /// Use this for I/O cost estimation and split sizing (e.g., balancing
+    /// parallel read splits by storage volume). For estimated in-memory size
+    /// and record count for query planning, use [`Table::compute_table_stats`]
+    /// instead — it returns values derived from the base file only.
     ///
     /// Files whose `file_metadata` is `None` contribute 0 to the sum.
-    /// The result may undercount when metadata has not been populated.
     #[inline]
     pub fn total_size_bytes(&self) -> u64 {
         let base = self

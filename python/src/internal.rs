@@ -526,6 +526,8 @@ impl HudiFileSlice {
             .map_err(PythonError::from)?;
         Ok(path)
     }
+    /// Total on-disk size (base + log files) in bytes.
+    /// Use for I/O cost estimation and split sizing.
     fn total_size_bytes(&self) -> u64 {
         self.base_file_size + self.log_file_sizes.iter().sum::<u64>()
     }

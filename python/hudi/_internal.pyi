@@ -198,7 +198,12 @@ class HudiFileSlice:
     num_records: int
 
     def total_size_bytes(self) -> int:
-        """Sum of base file size and all log file sizes, in bytes."""
+        """Total on-disk size (base + log files) in bytes.
+
+        Use for I/O cost estimation and split sizing. For estimated in-memory
+        size and record count for query planning, use
+        :meth:`HudiTable.compute_table_stats` instead.
+        """
         ...
     def has_log_files(self) -> bool:
         """True if this slice has at least one log file."""
