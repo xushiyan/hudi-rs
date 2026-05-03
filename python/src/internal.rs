@@ -507,6 +507,7 @@ pub struct HudiFileSlice {
     log_file_sizes: Vec<u64>,
     #[pyo3(get)]
     num_records: i64,
+    column_stats: Option<hudi::statistics::StatisticsContainer>,
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -534,6 +535,35 @@ impl HudiFileSlice {
 
     fn has_log_files(&self) -> bool {
         !self.log_file_names.is_empty()
+    }
+
+    /// Column statistics (min, max) from the base file Parquet footer.
+    ///
+    /// Returns a dict mapping column names to (min_array, max_array) tuples,
+    /// where each is a single-element PyArrow array or None.
+    /// Only populated when data-column filters trigger footer-based pruning
+    /// on COW tables or MOR read-optimized mode.
+    fn base_file_column_stats(&self, py: Python) -> PyResult<Option<PyObject>> {
+        use pyo3::types::PyDict;
+
+        let Some(stats) = &self.column_stats else {
+            return Ok(None);
+        };
+        let dict = PyDict::new(py);
+        for (name, col_stats) in &stats.columns {
+            let min_val = col_stats
+                .min_value
+                .as_ref()
+                .map(|arr| arr.to_data().to_pyarrow(py).map(|b| b.unbind()))
+                .transpose()?;
+            let max_val = col_stats
+                .max_value
+                .as_ref()
+                .map(|arr| arr.to_data().to_pyarrow(py).map(|b| b.unbind()))
+                .transpose()?;
+            dict.set_item(name, (min_val, max_val))?;
+        }
+        Ok(Some(dict.into()))
     }
 
     fn log_files_relative_paths(&self) -> PyResult<Vec<String>> {
@@ -573,6 +603,7 @@ impl From<&FileSlice> for HudiFileSlice {
             .map(|lf| lf.file_metadata.as_ref().map(|m| m.size).unwrap_or(0))
             .collect();
         let num_records = file_metadata.num_records;
+        let column_stats = f.base_file_column_stats.clone();
         HudiFileSlice {
             file_id,
             partition_path,
@@ -583,6 +614,7 @@ impl From<&FileSlice> for HudiFileSlice {
             log_file_names,
             log_file_sizes,
             num_records,
+            column_stats,
         }
     }
 }

@@ -208,6 +208,17 @@ class HudiFileSlice:
     def has_log_files(self) -> bool:
         """True if this slice has at least one log file."""
         ...
+    def base_file_column_stats(
+        self,
+    ) -> Optional[Dict[str, Tuple[Optional["pyarrow.Array"], Optional["pyarrow.Array"]]]]:
+        """Column statistics (min, max) from the base file Parquet footer.
+
+        Returns a dict mapping column names to ``(min_array, max_array)``
+        tuples, where each is a single-element PyArrow array or ``None``.
+        Only populated when data-column filters trigger footer-based
+        pruning on COW tables or MOR read-optimized mode.
+        """
+        ...
     def base_file_relative_path(self) -> str:
         """
         Returns the relative path of the base file for this file slice.
