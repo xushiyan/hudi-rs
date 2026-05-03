@@ -30,10 +30,8 @@ use crate::file_group::FileGroup;
 use crate::file_group::builder::file_groups_from_files_partition_records;
 use crate::file_group::file_slice::FileSlice;
 use crate::metadata::table::records::FilesPartitionRecord;
-use crate::statistics::StatisticsContainer;
 use crate::statistics::estimator::FileStatsEstimator;
 use crate::storage::Storage;
-use crate::storage::file_metadata::FileMetadata;
 use crate::table::Table;
 use crate::table::file_pruner::FilePruner;
 use crate::table::listing::FileLister;
@@ -203,41 +201,24 @@ impl FileSystemView {
                     continue;
                 }
 
-                let parquet_meta = match self
+                let (file_metadata, col_stats) = match self
                     .storage
-                    .get_parquet_file_metadata(&relative_path)
+                    .get_file_stats(&relative_path, table_schema)
                     .await
                 {
-                    Ok(m) => m,
+                    Ok(result) => result,
                     Err(e) => {
                         log::warn!(
-                            "Failed to load parquet metadata for {relative_path}: {e}. Including file."
+                            "Failed to load file stats for {relative_path}: {e}. Including file."
                         );
                         retained.push(fg);
                         continue;
                     }
                 };
 
-                let stats = StatisticsContainer::from_parquet_metadata(&parquet_meta, table_schema);
-
-                if file_pruner.should_include(&stats) {
-                    let num_records = parquet_meta.file_metadata().num_rows().max(0);
-                    let byte_size: i64 = parquet_meta
-                        .row_groups()
-                        .iter()
-                        .map(|rg| rg.total_byte_size())
-                        .sum::<i64>()
-                        .max(0);
-                    // Preserve existing on-disk size from MDT/estimator if available;
-                    // the footer only gives row group data sizes, not the full file size.
-                    let existing = fsl.base_file.file_metadata.take().unwrap_or_default();
-                    fsl.base_file.file_metadata = Some(FileMetadata {
-                        name: fsl.base_file.file_name(),
-                        size: existing.size,
-                        byte_size,
-                        num_records,
-                    });
-                    fsl.base_file_column_stats = Some(stats);
+                if file_pruner.should_include(&col_stats) {
+                    fsl.base_file.file_metadata = Some(file_metadata);
+                    fsl.base_file_column_stats = Some(col_stats);
                     retained.push(fg);
                 } else {
                     log::debug!("Pruned file {relative_path} based on column stats");
