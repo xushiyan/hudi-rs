@@ -238,11 +238,16 @@ impl ReadOptions {
     }
 
     /// Whether read-optimized mode is enabled (base files only, skip log merging).
-    pub fn is_read_optimized(&self) -> bool {
+    /// Returns `None` when unset in this `ReadOptions`.
+    pub fn read_optimized_override(&self) -> Option<bool> {
         self.hudi_options
             .get(HudiReadConfig::UseReadOptimizedMode.as_ref())
             .and_then(|s| s.parse::<bool>().ok())
-            .unwrap_or(false)
+    }
+
+    /// Whether read-optimized mode is enabled, defaulting to `false` when unset.
+    pub fn is_read_optimized(&self) -> bool {
+        self.read_optimized_override().unwrap_or(false)
     }
 
     /// The target batch size (rows per batch) for streaming reads, if set.
