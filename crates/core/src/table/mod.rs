@@ -322,8 +322,8 @@ impl Table {
         self.table_type() == TableTypeValue::MergeOnRead.as_ref()
     }
 
-    fn is_base_file_only(&self, options: &ReadOptions) -> bool {
-        !self.is_mor() || options.is_read_optimized()
+    fn is_base_file_only(&self, options: &ReadOptions) -> crate::Result<bool> {
+        Ok(!self.is_mor() || options.is_read_optimized()?)
     }
 
     pub fn timezone(&self) -> String {
@@ -436,7 +436,7 @@ impl Table {
     /// partitioning policy.
     pub async fn get_file_slices(&self, options: &ReadOptions) -> Result<Vec<FileSlice>> {
         let options = options.with_sanitized_timestamps();
-        let base_file_only = self.is_base_file_only(&options);
+        let base_file_only = self.is_base_file_only(&options)?;
         match options.query_type()? {
             QueryType::Snapshot => {
                 let Some(timestamp) = self.resolve_snapshot_timestamp(&options)? else {
@@ -629,7 +629,7 @@ impl Table {
         let Some(timestamp) = self.resolve_snapshot_timestamp(options)? else {
             return Ok(Vec::new());
         };
-        let base_file_only = self.is_base_file_only(options);
+        let base_file_only = self.is_base_file_only(options)?;
         let file_slices = self
             .get_file_slices_inner(&timestamp, &options.filters, base_file_only)
             .await?;
@@ -657,7 +657,7 @@ impl Table {
         let Some((start, end)) = self.resolve_incremental_range(options)? else {
             return Ok(Vec::new());
         };
-        let base_file_only = self.is_base_file_only(options);
+        let base_file_only = self.is_base_file_only(options)?;
         let file_slices = self
             .get_file_slices_between_inner(&start, &end, &options.filters, base_file_only)
             .await?;
@@ -793,7 +793,7 @@ impl Table {
             return Ok(Box::pin(stream::empty()));
         };
 
-        let base_file_only = self.is_base_file_only(options);
+        let base_file_only = self.is_base_file_only(options)?;
         let file_slices = self
             .get_file_slices_inner(&timestamp, &options.filters, base_file_only)
             .await?;

@@ -62,6 +62,8 @@ Per-slice reads — reading a single `FileSlice` the caller already selected (ty
 | `with_end_timestamp(ts)`     | `hoodie.read.end.timestamp`                  | latest commit (Incremental only)          |
 | `with_batch_size(n)`         | `hoodie.read.stream.batch_size`              | `1024` (streaming only)                   |
 
+Timestamp sanitization: at the dispatch point (`read`, `read_stream`, `get_file_slices`), timestamps irrelevant to the resolved query type are stripped before forwarding to inner methods. Snapshot discards `start_timestamp` / `end_timestamp`; incremental discards `as_of_timestamp`. Callers may set all three for convenience; only the applicable ones take effect.
+
 Which knobs each API consumes:
 
 | API                                                              | query type | as-of | start/end | filters | projection | batch size | hudi_options pass-through |
@@ -74,7 +76,7 @@ Which knobs each API consumes:
 Notes:
 
 - `read_stream` errors with `Unsupported` for `query_type = Incremental` — incremental streaming is not yet implemented.
-- The `hudi_options` bag is a per-read override layer — set arbitrary `hoodie.*` configs (e.g. `hoodie.read.use.read_optimized.mode = true`) without mutating the `Table`.
+- The `hudi_options` bag is a per-read override layer — set arbitrary `hoodie.read.*` configs (e.g. `hoodie.read.use.read_optimized.mode = true`) for this single read. Read configs (`hoodie.read.*`) are not stored in the `Table` instance; they flow exclusively through `ReadOptions`.
 - Per-slice reads are exposed only by `FileGroupReader`. The `Table` type owns logical reads (snapshot, incremental); per-slice reads are physical and belong at the file-group layer. To read one slice with table-level configs, build a `FileGroupReader` via `Table::create_file_group_reader_with_options` and call its per-slice methods.
 - For parallel reads, call `get_file_slices(...)` and bucket the result with `hudi::util::collection::split_into_chunks` or your engine's preferred partitioning policy.
 
@@ -120,7 +122,7 @@ All public symbols are re-exported from the `hudi` crate.
 | `get_partition_schema()`                                                   | `Result<Schema>`                                     |
 | `get_timeline()`                                                           | `&Timeline`                                          |
 | `get_file_slices(&ReadOptions)`                                            | `Result<Vec<FileSlice>>` (dispatches on `query_type`) |
-| `create_file_group_reader_with_options(read_options, extra_hudi_overrides, extra_storage_overrides)` | `Result<FileGroupReader>`                            |
+| `create_file_group_reader_with_options(read_options, extra_storage_overrides)` | `Result<FileGroupReader>`                            |
 | `read(&ReadOptions)`                                                       | `Result<Vec<RecordBatch>>` (dispatches on `query_type`) |
 | `read_stream(&ReadOptions)`                                                | `Result<BoxStream<'static, Result<RecordBatch>>>` (errors on `Incremental`) |
 | `compute_table_stats(Option<&ReadOptions>)`                                | `Option<(u64, u64)>` — `(rows, byte_size)`; see §7   |
@@ -141,15 +143,20 @@ All public symbols are re-exported from the `hudi` crate.
 `with_filters` and `with_batch_size` validate eagerly and return `Result<Self>`; the others are infallible. Chains intermix with `?` propagation:
 
 ```rust
+// Snapshot with time-travel
 let options = ReadOptions::new()
     .with_query_type(QueryType::Snapshot)
     .with_filters([("city", "=", "san_francisco")])?
     .with_projection(["rider", "city", "ts", "fare"])
     .with_batch_size(4096)?
     .with_as_of_timestamp("20240101000000000")
-    .with_start_timestamp("20240101000000000")
-    .with_end_timestamp("20240201000000000")
     .with_hudi_option("hoodie.read.use.read_optimized.mode", "true");
+
+// Incremental
+let options = ReadOptions::new()
+    .with_query_type(QueryType::Incremental)
+    .with_start_timestamp("20240101000000000")
+    .with_end_timestamp("20240201000000000");
 ```
 
 `with_batch_size(0)` errors at the builder (a zero-row batch yields no batches at the parquet stream reader). `with_filters` parses + cardinality-validates upfront; an unrecognized operator or empty `IN` / `NOT IN` value list errors here rather than at read time.
@@ -160,13 +167,13 @@ let options = ReadOptions::new()
 use hudi::table::builder::TableBuilder as HudiTableBuilder;
 
 let table = HudiTableBuilder::from_base_uri("/tmp/trips_table")
-    .with_hudi_option("hoodie.read.use.read_optimized.mode", "true")
+    .with_hudi_option("hoodie.metadata.enable", "true")
     .with_storage_option("aws_region", "us-west-2")
     .build()
     .await?;
 ```
 
-Available pairs: `with_hudi_option` / `with_hudi_options`, `with_storage_option` / `with_storage_options`, `with_option` / `with_options` (the generic forms route by key prefix).
+Available pairs: `with_hudi_option` / `with_hudi_options`, `with_storage_option` / `with_storage_options`, `with_option` / `with_options` (the generic forms route by key prefix). Read configs (`hoodie.read.*`) passed at table construction are silently dropped — they belong in `ReadOptions` per-call.
 
 ### Filter, Timeline, FileSlice
 
@@ -198,13 +205,13 @@ from hudi import HudiTableBuilder
 table = (
     HudiTableBuilder
     .from_base_uri("/tmp/trips_table")
-    .with_hudi_option("hoodie.read.use.read_optimized.mode", "true")
+    .with_hudi_option("hoodie.metadata.enable", "true")
     .with_storage_option("aws_region", "us-west-2")
     .build()
 )
 ```
 
-`with_hudi_option` and `with_option` accept a string key or a `HudiReadConfig` / `HudiTableConfig` enum member. The bulk variants (`with_hudi_options`, `with_options`) currently accept dicts of string keys.
+`with_hudi_option` and `with_option` accept a string key or a `HudiReadConfig` / `HudiTableConfig` enum member. The bulk variants (`with_hudi_options`, `with_options`) currently accept dicts of string keys. Read configs (`hoodie.read.*`) are silently dropped at table construction — pass them via `HudiReadOptions` per-call instead.
 
 ### `HudiTable`
 
@@ -217,7 +224,7 @@ table = (
 | `get_schema_in_avro_str()` / `get_schema_in_avro_str_with_meta_fields()`                           | `str`                                    |
 | `get_timeline()`                                                                                   | `HudiTimeline`                           |
 | `get_file_slices(options=None)`                                                                    | `List[HudiFileSlice]` (dispatches on `options.query_type`) |
-| `create_file_group_reader_with_options(read_options=None, extra_hudi_overrides=None, extra_storage_overrides=None)` | `HudiFileGroupReader`                    |
+| `create_file_group_reader_with_options(read_options=None, extra_storage_overrides=None)` | `HudiFileGroupReader`                    |
 | `read(options=None)`                                                                               | `List[pyarrow.RecordBatch]` (dispatches on `query_type`) |
 | `read_stream(options=None)`                                                                        | `HudiRecordBatchStream` (errors on `Incremental`) |
 | `compute_table_stats(options=None)`                                                                | `Optional[Tuple[int, int]]`; see §7      |
@@ -238,16 +245,22 @@ table = (
 ```python
 from hudi import HudiQueryType, HudiReadOptions
 
-# Constructor takes only the three stored fields; everything else is set via builders.
+# Snapshot with time-travel
 options = (
     HudiReadOptions(
         filters=[("city", "=", "san_francisco")],
         projection=["rider", "city", "ts", "fare"],
         hudi_options={"hoodie.read.use.read_optimized.mode": "true"},
     )
-    .with_query_type(HudiQueryType.Snapshot)  # or HudiQueryType.Incremental
+    .with_query_type(HudiQueryType.Snapshot)
     .with_batch_size(4096)
     .with_as_of_timestamp("20240101000000000")
+)
+
+# Incremental
+options = (
+    HudiReadOptions()
+    .with_query_type(HudiQueryType.Incremental)
     .with_start_timestamp("20240101000000000")
     .with_end_timestamp("20240201000000000")
 )
@@ -325,5 +338,7 @@ Reader APIs documented here are the supported public surface as of this release.
 - The query type is **incremental**. Commit metadata does not reliably carry base file sizes for all commit types — MOR delta commits record the log file size in `fileSizeInBytes`, not the base file size. A mix of COW/compaction commits (with base file sizes) and delta commits (without) would produce misleading partial stats, so `None` is returned unconditionally for incremental queries.
 
 For I/O cost estimation (on-disk base + log file sizes), use `FileSlice::total_size_bytes()` instead.
+
+`Table` / `HudiTable` only stores table configs (`HudiTableConfig`). Read configs (`HudiReadConfig`, keyed under `hoodie.read.*`) are filtered out during construction and flow exclusively through `ReadOptions` / `HudiReadOptions` per-call. `hudi_options()` on the table reflects the stored table configs, not any read configs the caller may have passed at construction.
 
 Out of scope for this version: writer APIs, internal architecture (timeline parsing, log-record merging, metadata table layout), the full configuration key glossary (`HudiReadConfig` / `HudiTableConfig` members), and the DataFusion and C++ bindings — separate spec follow-ups.

@@ -181,7 +181,7 @@ impl FileGroupReader {
             .into_iter()
             .map(|s| s.as_ref().to_string())
             .collect();
-        let base_file_only = log_file_paths.is_empty() || options.is_read_optimized();
+        let base_file_only = log_file_paths.is_empty() || options.is_read_optimized()?;
 
         let merged = if base_file_only {
             self.read_base_file_eager(base_file_path).await?
@@ -295,7 +295,7 @@ impl FileGroupReader {
         S: AsRef<str>,
     {
         let options = self.resolve_read_options(options);
-        if options.is_read_optimized() {
+        if options.is_read_optimized()? {
             return self.read_base_file_stream(base_file_path, &options).await;
         }
 

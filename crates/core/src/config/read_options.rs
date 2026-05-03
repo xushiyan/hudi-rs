@@ -262,11 +262,17 @@ impl ReadOptions {
     }
 
     /// Whether read-optimized mode is enabled (base files only, skip log merging).
-    pub fn is_read_optimized(&self) -> bool {
-        self.hudi_options
-            .get(HudiReadConfig::UseReadOptimizedMode.as_ref())
-            .and_then(|s| s.parse::<bool>().ok())
-            .unwrap_or(false)
+    pub fn is_read_optimized(&self) -> crate::Result<bool> {
+        let key = HudiReadConfig::UseReadOptimizedMode.as_ref();
+        match self.hudi_options.get(key) {
+            Some(s) => {
+                let parsed = s.parse::<bool>().map_err(|e| {
+                    ConfigError::ParseBool(key.to_string(), s.clone(), e)
+                })?;
+                Ok(parsed)
+            }
+            None => Ok(false),
+        }
     }
 
     /// The target batch size (rows per batch) for streaming reads, if set.
@@ -409,6 +415,27 @@ mod tests {
         );
         assert_eq!(options.hudi_options.get("a"), Some(&"1".to_string()));
         assert_eq!(options.hudi_options.get("b"), Some(&"2".to_string()));
+    }
+
+    #[test]
+    fn test_is_read_optimized_round_trip() -> crate::Result<()> {
+        assert!(!ReadOptions::new().is_read_optimized()?);
+
+        let opts = ReadOptions::new()
+            .with_hudi_option(HudiReadConfig::UseReadOptimizedMode.as_ref(), "true");
+        assert!(opts.is_read_optimized()?);
+
+        let opts = ReadOptions::new()
+            .with_hudi_option(HudiReadConfig::UseReadOptimizedMode.as_ref(), "false");
+        assert!(!opts.is_read_optimized()?);
+
+        for invalid in ["1", "yes", "on", "TRUE_ISH"] {
+            let opts = ReadOptions::new()
+                .with_hudi_option(HudiReadConfig::UseReadOptimizedMode.as_ref(), invalid);
+            let err = opts.is_read_optimized().unwrap_err();
+            assert!(err.to_string().contains(invalid), "expected error to mention '{invalid}'");
+        }
+        Ok(())
     }
 
     #[test]
