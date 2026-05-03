@@ -193,10 +193,7 @@ impl Storage {
     /// Get the Arrow schema from a base file.
     ///
     /// Currently supports Parquet only; other formats (e.g., Lance) can be added.
-    pub async fn get_file_schema(
-        &self,
-        relative_path: &str,
-    ) -> Result<arrow_schema::Schema> {
+    pub async fn get_file_schema(&self, relative_path: &str) -> Result<arrow_schema::Schema> {
         let parquet_meta = self.get_parquet_file_metadata(relative_path).await?;
         Ok(parquet_to_arrow_schema(
             parquet_meta.file_metadata().schema_descr(),
