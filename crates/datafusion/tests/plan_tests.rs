@@ -30,7 +30,7 @@ use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_common::{DataFusionError, ScalarValue};
 
-use hudi_core::config::read::HudiReadConfig::InputPartitions;
+use hudi_core::config::table::HudiTableConfig::InputPartitions;
 use hudi_core::config::util::empty_options;
 use hudi_core::metadata::meta_field::MetaField;
 use hudi_datafusion::{HudiDataSource, HudiTableFactory};

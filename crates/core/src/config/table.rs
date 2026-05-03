@@ -145,6 +145,15 @@ pub enum HudiTableConfig {
     /// When creating a metadata table instance, this value should be passed as the
     /// PartitionFields option.
     MetadataTablePartitions,
+
+    /// Number of input partitions to read the data in parallel.
+    ///
+    /// For processing 100 files, [InputPartitions] being 5 will produce
+    /// 5 partitions, with each partition having 20 files.
+    InputPartitions,
+
+    /// Parallelism for listing files on storage.
+    ListingParallelism,
 }
 
 impl AsRef<str> for HudiTableConfig {
@@ -175,6 +184,8 @@ impl AsRef<str> for HudiTableConfig {
             Self::TimelineHistoryPath => "hoodie.timeline.history.path",
             Self::MetadataTableEnabled => "hoodie.metadata.enable",
             Self::MetadataTablePartitions => "hoodie.table.metadata.partitions",
+            Self::InputPartitions => "hoodie.read.input.partitions",
+            Self::ListingParallelism => "hoodie.read.listing.parallelism",
         }
     }
 }
@@ -207,6 +218,8 @@ impl ConfigParser for HudiTableConfig {
             Self::TimelineHistoryPath => Some(HudiConfigValue::String("history".to_string())),
             Self::MetadataTableEnabled => Some(HudiConfigValue::Boolean(false)),
             Self::MetadataTablePartitions => Some(HudiConfigValue::List(vec![])),
+            Self::InputPartitions => Some(HudiConfigValue::UInteger(0usize)),
+            Self::ListingParallelism => Some(HudiConfigValue::UInteger(10usize)),
             _ => None,
         }
     }
@@ -290,6 +303,16 @@ impl ConfigParser for HudiTableConfig {
                 .map(HudiConfigValue::Boolean),
             Self::MetadataTablePartitions => get_result
                 .map(|v| HudiConfigValue::List(v.split(',').map(str::to_string).collect())),
+            Self::InputPartitions => get_result
+                .and_then(|v| {
+                    usize::from_str(v).map_err(|e| ParseInt(self.key(), v.to_string(), e))
+                })
+                .map(HudiConfigValue::UInteger),
+            Self::ListingParallelism => get_result
+                .and_then(|v| {
+                    usize::from_str(v).map_err(|e| ParseInt(self.key(), v.to_string(), e))
+                })
+                .map(HudiConfigValue::UInteger),
         }
     }
 

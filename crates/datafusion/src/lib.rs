@@ -47,7 +47,7 @@ use datafusion_physical_expr::create_physical_expr;
 use log::warn;
 
 use crate::util::expr::exprs_to_filters;
-use hudi_core::config::read::HudiReadConfig::{InputPartitions, UseReadOptimizedMode};
+use hudi_core::config::read::HudiReadConfig::UseReadOptimizedMode;
 use hudi_core::config::table::{BaseFileFormatValue, HudiTableConfig};
 use hudi_core::config::util::empty_options;
 use hudi_core::storage::util::{get_scheme_authority, join_url_segments};
@@ -124,19 +124,7 @@ impl HudiDataSource {
         K: AsRef<str>,
         V: Into<String>,
     {
-        let mut all_options: Vec<(String, String)> = options
-            .into_iter()
-            .map(|(k, v)| (k.as_ref().to_string(), v.into()))
-            .collect();
-        // DataFusion reads base files only via ParquetSource so force
-        // read-optimized mode regardless of caller input.
-        // TODO: Implement MOR log merging using custom Hudi source and remove this override.
-        all_options.retain(|(k, _)| k != UseReadOptimizedMode.as_ref());
-        all_options.push((
-            UseReadOptimizedMode.as_ref().to_string(),
-            "true".to_string(),
-        ));
-        let table = HudiTable::new_with_options(base_uri, all_options)
+        let table = HudiTable::new_with_options(base_uri, options)
             .await
             .map_err(|e| Execution(format!("Failed to create Hudi table: {e}")))?;
 
@@ -203,7 +191,7 @@ impl HudiDataSource {
     fn get_input_partitions(&self) -> usize {
         self.table
             .hudi_configs
-            .get_or_default(InputPartitions)
+            .get_or_default(HudiTableConfig::InputPartitions)
             .into()
     }
 
@@ -369,7 +357,8 @@ impl TableProvider for HudiDataSource {
         let pushdown_filters = exprs_to_filters(&partition_filters);
         let read_options = ReadOptions::new()
             .with_filters(pushdown_filters)
-            .map_err(|e| Execution(format!("Invalid pushdown filter: {e}")))?;
+            .map_err(|e| Execution(format!("Invalid pushdown filter: {e}")))?
+            .with_hudi_option(UseReadOptimizedMode.as_ref(), "true");
         let flat_slices = self
             .table
             .get_file_slices(&read_options)

@@ -82,11 +82,7 @@ mod v6_tables {
         #[tokio::test]
         async fn test_non_partitioned_read_optimized() -> Result<()> {
             let base_url = SampleTable::V6Nonpartitioned.url_to_mor_parquet();
-            let hudi_table = Table::new_with_options(
-                base_url.path(),
-                [(HudiReadConfig::UseReadOptimizedMode.as_ref(), "true")],
-            )
-            .await?;
+            let hudi_table = Table::new(base_url.path()).await?;
             let commit_timestamps = hudi_table
                 .timeline
                 .completed_commits
@@ -95,7 +91,11 @@ mod v6_tables {
                 .collect::<Vec<_>>();
             let latest_commit = commit_timestamps.last().unwrap();
             let records = hudi_table
-                .read(&ReadOptions::new().with_as_of_timestamp(latest_commit))
+                .read(
+                    &ReadOptions::new()
+                        .with_as_of_timestamp(latest_commit)
+                        .with_hudi_option(HudiReadConfig::UseReadOptimizedMode.as_ref(), "true"),
+                )
                 .await?;
             let schema = &records[0].schema();
             let records = concat_batches(schema, &records)?;
@@ -116,12 +116,10 @@ mod v6_tables {
         #[tokio::test]
         async fn test_read_optimized_file_slices_have_no_log_files() -> Result<()> {
             let base_url = SampleTable::V6Nonpartitioned.url_to_mor_parquet();
-            let hudi_table = Table::new_with_options(
-                base_url.path(),
-                [(HudiReadConfig::UseReadOptimizedMode.as_ref(), "true")],
-            )
-            .await?;
-            let file_slices = hudi_table.get_file_slices(&ReadOptions::new()).await?;
+            let hudi_table = Table::new(base_url.path()).await?;
+            let ro_opts = ReadOptions::new()
+                .with_hudi_option(HudiReadConfig::UseReadOptimizedMode.as_ref(), "true");
+            let file_slices = hudi_table.get_file_slices(&ro_opts).await?;
             assert!(!file_slices.is_empty());
             for fs in &file_slices {
                 assert!(
@@ -960,8 +958,19 @@ mod v9_tables {
         rows
     }
 
+    fn read_optimized_options() -> ReadOptions {
+        ReadOptions::new().with_hudi_option(HudiReadConfig::UseReadOptimizedMode.as_ref(), "true")
+    }
+
     async fn read_txn_rows_from_snapshot(hudi_table: &Table) -> Result<Vec<(String, String, i64)>> {
         let records = hudi_table.read(&ReadOptions::new()).await?;
+        Ok(txn_rows(&records))
+    }
+
+    async fn read_txn_rows_from_snapshot_ro(
+        hudi_table: &Table,
+    ) -> Result<Vec<(String, String, i64)>> {
+        let records = hudi_table.read(&read_optimized_options()).await?;
         Ok(txn_rows(&records))
     }
 
@@ -975,16 +984,8 @@ mod v9_tables {
         Ok(txn_rows(&records))
     }
 
-    async fn open_table(path: &str, use_read_optimized: bool) -> Result<Table> {
-        if use_read_optimized {
-            Table::new_with_options(
-                path,
-                [(HudiReadConfig::UseReadOptimizedMode.as_ref(), "true")],
-            )
-            .await
-        } else {
-            Table::new(path).await
-        }
+    async fn open_table(path: &str) -> Result<Table> {
+        Table::new(path).await
     }
 
     mod snapshot_queries {
@@ -993,7 +994,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_timebasedkeygen_epochmillis_cow_snapshot() -> Result<()> {
             let base_url = SampleTable::V9TimebasedkeygenEpochmillis.url_to_cow();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
             assert_eq!(
@@ -1013,7 +1014,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_timebasedkeygen_nonhivestyle_cow_snapshot() -> Result<()> {
             let base_url = SampleTable::V9TimebasedkeygenNonhivestyle.url_to_cow();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
             assert_eq!(
@@ -1032,7 +1033,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_timebasedkeygen_unixtimestamp_cow_snapshot() -> Result<()> {
             let base_url = SampleTable::V9TimebasedkeygenUnixtimestamp.url_to_cow();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
             assert_eq!(
@@ -1052,7 +1053,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_txns_simple_overwrite_cow_snapshot() -> Result<()> {
             let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
             assert_eq!(
@@ -1069,9 +1070,9 @@ mod v9_tables {
         #[tokio::test]
         async fn test_timebasedkeygen_nonhivestyle_mor_snapshot() -> Result<()> {
             let base_url = SampleTable::V9TimebasedkeygenNonhivestyle.url_to_mor_avro();
-            let hudi_table = open_table(base_url.path(), true).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
-            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            let rows = read_txn_rows_from_snapshot_ro(&hudi_table).await?;
             assert_eq!(
                 rows,
                 vec![
@@ -1090,9 +1091,9 @@ mod v9_tables {
         #[tokio::test]
         async fn test_txns_simple_overwrite_mor_snapshot() -> Result<()> {
             let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_mor_avro();
-            let hudi_table = open_table(base_url.path(), true).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
-            let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
+            let rows = read_txn_rows_from_snapshot_ro(&hudi_table).await?;
             assert_eq!(
                 rows,
                 vec![
@@ -1107,7 +1108,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_nonpartitioned_rollback_mor_snapshot() -> Result<()> {
             let base_url = SampleTable::V9NonpartitionedRollback.url_to_mor_avro();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let rows = read_txn_rows_from_snapshot(&hudi_table).await?;
             assert_eq!(
@@ -1129,7 +1130,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_txns_simple_overwrite_cow_time_travel() -> Result<()> {
             let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let commits = hudi_table.timeline.get_completed_commits(false).await?;
             let replace_commits = hudi_table
@@ -1179,7 +1180,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_nonpartitioned_rollback_mor_time_travel() -> Result<()> {
             let base_url = SampleTable::V9NonpartitionedRollback.url_to_mor_avro();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let deltacommits = hudi_table
                 .timeline
@@ -1222,7 +1223,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_txns_simple_overwrite_cow_incremental() -> Result<()> {
             let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let commit_timestamps = hudi_table
                 .timeline
@@ -1330,7 +1331,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_nonpartitioned_rollback_mor_incremental() -> Result<()> {
             let base_url = SampleTable::V9NonpartitionedRollback.url_to_mor_avro();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let deltacommits = hudi_table
                 .timeline
@@ -1411,7 +1412,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_read_snapshot_stream_basic() -> Result<()> {
             let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let options = ReadOptions::new();
             let stream = hudi_table.read_stream(&options).await?;
@@ -1434,7 +1435,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_read_snapshot_stream_with_batch_size() -> Result<()> {
             let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let options = ReadOptions::new().with_batch_size(1)?;
             let stream = hudi_table.read_stream(&options).await?;
@@ -1448,7 +1449,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_read_snapshot_stream_with_partition_filters() -> Result<()> {
             let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let options = ReadOptions::new().with_filters([("region", "=", "us")])?;
             let stream = hudi_table.read_stream(&options).await?;
@@ -1469,7 +1470,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_read_snapshot_stream_with_non_matching_partition_filter() -> Result<()> {
             let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let options = ReadOptions::new().with_filters([("region", "=", "latam")])?;
             let stream = hudi_table.read_stream(&options).await?;
@@ -1485,7 +1486,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_read_file_slice_stream_basic() -> Result<()> {
             let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let file_slices = hudi_table.get_file_slices(&ReadOptions::new()).await?;
             assert!(
@@ -1510,7 +1511,7 @@ mod v9_tables {
         #[tokio::test]
         async fn test_read_file_slice_stream_with_batch_size() -> Result<()> {
             let base_url = SampleTable::V9TxnsSimpleOverwrite.url_to_cow();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let file_slices = hudi_table.get_file_slices(&ReadOptions::new()).await?;
             let file_slice = &file_slices[0];
@@ -1533,7 +1534,7 @@ mod v9_tables {
             // Test MOR table with log files in snapshot mode (non read-optimized)
             // so streaming falls back to collect+merge.
             let base_url = SampleTable::V9TimebasedkeygenNonhivestyle.url_to_mor_avro();
-            let hudi_table = open_table(base_url.path(), false).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
             let file_slices = hudi_table.get_file_slices(&ReadOptions::new()).await?;
             assert!(
@@ -1560,9 +1561,9 @@ mod v9_tables {
         #[tokio::test]
         async fn test_read_snapshot_stream_mor_read_optimized() -> Result<()> {
             let base_url = SampleTable::V9TimebasedkeygenNonhivestyle.url_to_mor_avro();
-            let hudi_table = open_table(base_url.path(), true).await?;
+            let hudi_table = open_table(base_url.path()).await?;
 
-            let options = ReadOptions::new();
+            let options = read_optimized_options();
             let stream = hudi_table.read_stream(&options).await?;
             let batches = collect_stream_batches(stream).await?;
 

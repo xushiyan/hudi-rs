@@ -36,7 +36,7 @@ def test_internal_config_keys_returns_both_enums():
     read_dict = dict(read_entries)
     assert table_dict["TABLE_NAME"] == "hoodie.table.name"
     assert table_dict["BASE_FILE_FORMAT"] == "hoodie.table.base.file.format"
-    assert read_dict["INPUT_PARTITIONS"] == "hoodie.read.input.partitions"
+    assert table_dict["INPUT_PARTITIONS"] == "hoodie.read.input.partitions"
     assert read_dict["START_TIMESTAMP"] == "hoodie.read.start.timestamp"
 
 
@@ -53,7 +53,7 @@ def test_config_enums_are_real_python_enums():
     # str mixin
     assert HudiTableConfig.TABLE_NAME.value == "hoodie.table.name"
     assert HudiTableConfig.TABLE_NAME == "hoodie.table.name"
-    assert HudiReadConfig.INPUT_PARTITIONS == "hoodie.read.input.partitions"
+    assert HudiTableConfig.INPUT_PARTITIONS == "hoodie.read.input.partitions"
 
     # Lookups, hashing, iteration
     assert HudiTableConfig["TABLE_NAME"] is HudiTableConfig.TABLE_NAME
@@ -64,4 +64,4 @@ def test_config_enums_are_real_python_enums():
 
     # Population non-empty (defends against silent regression)
     assert len(HudiTableConfig) >= 20
-    assert len(HudiReadConfig) >= 5
+    assert len(HudiReadConfig) >= 4

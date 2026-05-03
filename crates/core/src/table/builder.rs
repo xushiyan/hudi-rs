@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::Result;
+use crate::config::read::is_read_config_key;
 use crate::config::table::HudiTableConfig;
 use crate::config::util::{parse_data_for_options, split_hudi_options_from_others};
 use crate::config::{HUDI_CONF_DIR, HudiConfigs};
@@ -105,7 +106,12 @@ impl TableBuilder {
 
         option_resolver.resolve_options().await?;
 
-        let hudi_configs = Arc::from(HudiConfigs::new(option_resolver.hudi_options.iter()));
+        let hudi_configs = Arc::from(HudiConfigs::new(
+            option_resolver
+                .hudi_options
+                .iter()
+                .filter(|(k, _)| !is_read_config_key(k)),
+        ));
 
         let storage_options = Arc::from(self.option_resolver.storage_options.clone());
 
