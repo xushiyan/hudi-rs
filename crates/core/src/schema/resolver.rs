@@ -74,7 +74,7 @@ pub async fn resolve_avro_schema_with_meta_fields(table: &Table) -> Result<Strin
 }
 
 fn resolve_data_schema_from_create_schema(table: &Table) -> Result<Schema> {
-    if let Some(create_schema) = table.hudi_configs.try_get(HudiTableConfig::CreateSchema) {
+    if let Some(create_schema) = table.hudi_configs.try_get(HudiTableConfig::CreateSchema)? {
         let avro_schema_str: String = create_schema.into();
         arrow_schema_from_avro_schema_str(&avro_schema_str)
     } else {
@@ -85,7 +85,7 @@ fn resolve_data_schema_from_create_schema(table: &Table) -> Result<Schema> {
 }
 
 fn resolve_avro_schema_from_create_schema(table: &Table) -> Result<String> {
-    if let Some(create_schema) = table.hudi_configs.try_get(HudiTableConfig::CreateSchema) {
+    if let Some(create_schema) = table.hudi_configs.try_get(HudiTableConfig::CreateSchema)? {
         let create_schema: String = create_schema.into();
         Ok(sanitize_avro_schema_str(&create_schema))
     } else {

@@ -105,8 +105,7 @@ mod tests {
 
     #[test]
     fn parse_valid_config_value() {
-        let options =
-            HashMap::from([(ListingParallelism.as_ref().to_string(), "20".to_string())]);
+        let options = HashMap::from([(ListingParallelism.as_ref().to_string(), "20".to_string())]);
         let actual: usize = ListingParallelism.parse_value(&options).unwrap().into();
         assert_eq!(actual, 20);
     }

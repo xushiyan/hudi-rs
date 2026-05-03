@@ -136,7 +136,10 @@ impl Storage {
         options: Arc<HashMap<String, String>>,
         hudi_configs: Arc<HudiConfigs>,
     ) -> Result<Arc<Storage>> {
-        let base_url = match hudi_configs.try_get(HudiTableConfig::BasePath) {
+        let base_url = match hudi_configs
+            .try_get(HudiTableConfig::BasePath)
+            .map_err(|e| Creation(format!("{e}")))?
+        {
             Some(v) => v.to_url()?,
             None => {
                 return Err(Creation(format!(

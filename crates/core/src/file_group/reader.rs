@@ -106,7 +106,7 @@ impl FileGroupReader {
         })
     }
 
-    fn resolve_read_options(&self, options: &ReadOptions) -> ReadOptions {
+    fn resolve_read_options(&self, options: &ReadOptions) -> Result<ReadOptions> {
         options.with_defaults_from(&self.hudi_configs)
     }
 
@@ -122,20 +122,26 @@ impl FileGroupReader {
         apply_commit_time_filter(&self.hudi_configs, records)
     }
 
-    fn create_instant_range_for_log_file_scan(&self) -> InstantRange {
+    fn create_instant_range_for_log_file_scan(&self) -> Result<InstantRange> {
         let timezone = self
             .hudi_configs
             .get_or_default(HudiTableConfig::TimelineTimezone)
             .into();
         let start_timestamp = self
             .hudi_configs
-            .try_get(HudiReadConfig::StartTimestamp)
+            .try_get(HudiReadConfig::StartTimestamp)?
             .map(|v| -> String { v.into() });
         let end_timestamp = self
             .hudi_configs
-            .try_get(HudiReadConfig::EndTimestamp)
+            .try_get(HudiReadConfig::EndTimestamp)?
             .map(|v| -> String { v.into() });
-        InstantRange::new(timezone, start_timestamp, end_timestamp, false, true)
+        Ok(InstantRange::new(
+            timezone,
+            start_timestamp,
+            end_timestamp,
+            false,
+            true,
+        ))
     }
 
     /// Reads the data from the given file slice.
@@ -176,7 +182,7 @@ impl FileGroupReader {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let options = self.resolve_read_options(options);
+        let options = self.resolve_read_options(options)?;
         let log_file_paths: Vec<String> = log_file_paths
             .into_iter()
             .map(|s| s.as_ref().to_string())
@@ -186,7 +192,7 @@ impl FileGroupReader {
         let merged = if base_file_only {
             self.read_base_file_eager(base_file_path).await?
         } else {
-            let instant_range = self.create_instant_range_for_log_file_scan();
+            let instant_range = self.create_instant_range_for_log_file_scan()?;
             let scan_result = LogFileScanner::new(self.hudi_configs.clone(), self.storage.clone())
                 .scan(log_file_paths, &instant_range)
                 .await?;
@@ -294,7 +300,7 @@ impl FileGroupReader {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let options = self.resolve_read_options(options);
+        let options = self.resolve_read_options(options)?;
         if options.is_read_optimized()? {
             return self.read_base_file_stream(base_file_path, &options).await;
         }
@@ -365,7 +371,7 @@ impl FileGroupReader {
                 .into();
             let has_start_ts = self
                 .hudi_configs
-                .try_get(HudiReadConfig::StartTimestamp)
+                .try_get(HudiReadConfig::StartTimestamp)?
                 .is_some();
             populates_meta_fields && has_start_ts
         };
@@ -532,7 +538,7 @@ impl FileGroupReader {
         let log_records = if log_file_paths.is_empty() {
             vec![]
         } else {
-            let instant_range = self.create_instant_range_for_log_file_scan();
+            let instant_range = self.create_instant_range_for_log_file_scan()?;
             let scan_result = LogFileScanner::new(self.hudi_configs.clone(), self.storage.clone())
                 .scan(log_file_paths, &instant_range)
                 .await?;
@@ -567,11 +573,10 @@ fn create_commit_time_filter_mask(
         return Ok(None);
     }
 
-    let start_ts = hudi_configs
-        .try_get(HudiReadConfig::StartTimestamp)
-        .map(|v| -> String { v.into() });
+    let start_ts: Option<String> = hudi_configs
+        .try_get(HudiReadConfig::StartTimestamp)?
+        .map(|v| v.into());
     if start_ts.is_none() {
-        // If start timestamp is not provided, the query is snapshot or time-travel
         return Ok(None);
     }
 
@@ -584,7 +589,7 @@ fn create_commit_time_filter_mask(
     }
 
     if let Some(end) = hudi_configs
-        .try_get(HudiReadConfig::EndTimestamp)
+        .try_get(HudiReadConfig::EndTimestamp)?
         .map(|v| -> String { v.into() })
     {
         let filter = Filter::try_from((MetaField::CommitTime.as_ref(), "<=", end.as_str()))?;

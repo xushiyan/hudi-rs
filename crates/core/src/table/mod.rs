@@ -399,7 +399,7 @@ impl Table {
 
         // Timestamp-based keygen: the source field is transformed into partition path
         // strings, so use a single _hoodie_partition_path field.
-        if is_timestamp_based_keygen(&self.hudi_configs) {
+        if is_timestamp_based_keygen(&self.hudi_configs)? {
             return Ok(Schema::new(vec![Field::new(
                 MetaField::PartitionPath.as_ref(),
                 arrow_schema::DataType::Utf8,
@@ -927,6 +927,22 @@ mod tests {
     use std::path::PathBuf;
     use std::{env, panic};
 
+    /// Test helper that loads resolved `HudiConfigs` from a test data directory
+    /// without constructing a full `Table`. Useful for testing config parsing
+    /// with intentionally invalid values that would prevent table construction.
+    async fn get_test_configs(table_dir_name: &str) -> Arc<HudiConfigs> {
+        let base_url = Url::from_file_path(
+            canonicalize(PathBuf::from("tests").join("data").join(table_dir_name)).unwrap(),
+        )
+        .unwrap();
+        let mut resolver = crate::table::builder::OptionResolver::new_with_options(
+            base_url.as_str(),
+            [("hoodie.internal.skip.config.validation", "true")],
+        );
+        resolver.resolve_options().await.unwrap();
+        Arc::new(HudiConfigs::new(resolver.hudi_options.iter()))
+    }
+
     /// Test helper to create a new `Table` instance without validating the configuration.
     ///
     /// # Arguments
@@ -1149,8 +1165,7 @@ mod tests {
     #[tokio::test]
     #[serial(env_vars)]
     async fn validate_invalid_table_props() {
-        let table = get_test_table_without_validation("table_props_invalid").await;
-        let configs = table.hudi_configs;
+        let configs = get_test_configs("table_props_invalid").await;
         assert!(
             configs.validate(BaseFileFormat).is_err(),
             "required config is missing"
@@ -1202,8 +1217,7 @@ mod tests {
     #[tokio::test]
     #[serial(env_vars)]
     async fn get_invalid_table_props() {
-        let table = get_test_table_without_validation("table_props_invalid").await;
-        let configs = table.hudi_configs;
+        let configs = get_test_configs("table_props_invalid").await;
         assert!(configs.get(BaseFileFormat).is_err());
         assert!(configs.get(Checksum).is_err());
         assert!(configs.get(DatabaseName).is_err());
@@ -1225,8 +1239,7 @@ mod tests {
     #[tokio::test]
     #[serial(env_vars)]
     async fn get_default_for_invalid_table_props() {
-        let table = get_test_table_without_validation("table_props_invalid").await;
-        let configs = table.hudi_configs;
+        let configs = get_test_configs("table_props_invalid").await;
         let actual: String = configs.get_or_default(BaseFileFormat).into();
         assert_eq!(actual, "parquet");
         assert!(panic::catch_unwind(|| configs.get_or_default(Checksum)).is_err());

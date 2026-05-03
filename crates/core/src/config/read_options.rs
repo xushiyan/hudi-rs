@@ -282,18 +282,18 @@ impl ReadOptions {
     /// Fill in defaults from the given configs for keys not already set.
     ///
     /// Values already present in this `ReadOptions` take precedence.
-    pub fn with_defaults_from(&self, configs: &HudiConfigs) -> Self {
+    pub fn with_defaults_from(&self, configs: &HudiConfigs) -> crate::Result<Self> {
         let mut resolved = self.clone();
         for key in HudiReadConfig::iter() {
             let key_str = key.key_str();
             if !resolved.hudi_options.contains_key(key_str) {
-                if let Some(val) = configs.try_get(key) {
+                if let Some(val) = configs.try_get(key)? {
                     let s: String = val.into();
                     resolved.hudi_options.insert(key_str.to_string(), s);
                 }
             }
         }
-        resolved
+        Ok(resolved)
     }
 
     pub fn batch_size(&self) -> crate::Result<Option<usize>> {
