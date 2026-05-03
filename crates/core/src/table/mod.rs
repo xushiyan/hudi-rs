@@ -935,9 +935,13 @@ impl Table {
     async fn compute_change_stats_inner(&self, options: &ReadOptions) -> Result<(u64, u64)> {
         let file_slices = self.get_file_slices(options).await?;
 
-        // Both num_records and byte_size come from the base file only.
-        // The estimator populates these from the base file's on-disk size
-        // using sampled Parquet footer ratios, consistent with the snapshot path.
+        // Both num_records and byte_size come from the base file only, estimated
+        // from its on-disk size via the sampled Parquet footer ratios.
+        //
+        // Base file metadata is populated only when the commit metadata's
+        // fileSizeInBytes refers to the base file (COW writes, MOR inserts,
+        // compaction). MOR delta commits report the log file size instead,
+        // so the base file metadata stays None and contributes 0 here.
         let (total_records, total_bytes) = file_slices.iter().fold((0u64, 0u64), |(r, b), fs| {
             let m = fs.base_file.file_metadata.as_ref();
             let records = m.map(|m| m.num_records.max(0) as u64).unwrap_or(0);
