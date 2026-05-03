@@ -59,5 +59,7 @@ Naming: `test_<function>_<scenario>_<expected>`. Shared fixtures in `crates/test
 
 ## Style
 
+Run `make format-rust check-rust` before submitting to match CI.
+
 - **Inline format args** (Rust 1.88+): `format!("{x}")`, not `format!("{}", x)` — expressions
   like `path.display()` still require positional args.

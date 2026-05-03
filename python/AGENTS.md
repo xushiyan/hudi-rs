@@ -2,6 +2,8 @@
 
 ## Linting & Formatting
 
+Run `make format-python check-python` before submitting to match CI.
+
 `ruff` (`E4 E7 E9 F I`, target `py310`) + `mypy --strict` over `hudi/*.py`. `snake_case`,
 docstrings on public APIs, type hints in `python/hudi/_internal.pyi`.
 
