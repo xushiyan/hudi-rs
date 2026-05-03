@@ -432,10 +432,18 @@ impl Table {
     /// [`crate::util::collection::split_into_chunks`] or your engine's preferred
     /// partitioning policy.
     pub async fn get_file_slices(&self, options: &ReadOptions) -> Result<Vec<FileSlice>> {
-        match options.query_type()? {
+        let mut file_slices = match options.query_type()? {
             QueryType::Snapshot => self.get_snapshot_file_slices(options).await,
             QueryType::Incremental => self.get_incremental_file_slices(options).await,
+        }?;
+
+        if options.is_read_optimized() {
+            for fs in &mut file_slices {
+                fs.log_files.clear();
+            }
         }
+
+        Ok(file_slices)
     }
 
     async fn get_snapshot_file_slices(&self, options: &ReadOptions) -> Result<Vec<FileSlice>> {

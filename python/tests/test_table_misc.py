@@ -92,6 +92,20 @@ def test_file_slice_size_accessors_cow():
     assert fs.total_size_bytes() == fs.base_file_size
 
 
+def test_file_slice_read_optimized_strips_log_files(v8_trips_table):
+    table = HudiTable(v8_trips_table)
+    options = HudiReadOptions().with_hudi_option(
+        "hoodie.read.use.read_optimized.mode", "true"
+    )
+    slices = table.get_file_slices(options)
+    assert len(slices) > 0
+    for fs in slices:
+        assert fs.log_file_names == []
+        assert fs.log_file_sizes == []
+        assert fs.has_log_files() is False
+        assert fs.total_size_bytes() == fs.base_file_size
+
+
 def test_file_slice_size_accessors_mor(v8_trips_table):
     table = HudiTable(v8_trips_table)
     slices = table.get_file_slices()

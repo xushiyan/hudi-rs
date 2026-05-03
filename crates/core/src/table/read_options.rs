@@ -237,6 +237,14 @@ impl ReadOptions {
             .map(|s| s.as_str())
     }
 
+    /// Whether read-optimized mode is enabled (base files only, skip log merging).
+    pub fn is_read_optimized(&self) -> bool {
+        self.hudi_options
+            .get(HudiReadConfig::UseReadOptimizedMode.as_ref())
+            .and_then(|s| s.parse::<bool>().ok())
+            .unwrap_or(false)
+    }
+
     /// The target batch size (rows per batch) for streaming reads, if set.
     /// Errors if the stored string is not a valid `usize` or if the value is `0`
     /// (a zero-row batch yields no batches at the parquet stream reader and is
