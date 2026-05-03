@@ -114,6 +114,48 @@ mod v6_tables {
         }
 
         #[tokio::test]
+        async fn test_read_optimized_file_slices_have_no_log_files() -> Result<()> {
+            let base_url = SampleTable::V6Nonpartitioned.url_to_mor_parquet();
+            let hudi_table = Table::new_with_options(
+                base_url.path(),
+                [(HudiReadConfig::UseReadOptimizedMode.as_ref(), "true")],
+            )
+            .await?;
+            let file_slices = hudi_table.get_file_slices(&ReadOptions::new()).await?;
+            assert!(!file_slices.is_empty());
+            for fs in &file_slices {
+                assert!(
+                    fs.log_files.is_empty(),
+                    "RO mode should strip log files from file slices"
+                );
+            }
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_read_optimized_via_read_options() -> Result<()> {
+            let base_url = SampleTable::V6Nonpartitioned.url_to_mor_parquet();
+            let hudi_table = Table::new(base_url.path()).await?;
+            let ro_options = ReadOptions::new()
+                .with_hudi_option(HudiReadConfig::UseReadOptimizedMode.as_ref(), "true");
+            let file_slices = hudi_table.get_file_slices(&ro_options).await?;
+            assert!(!file_slices.is_empty());
+            for fs in &file_slices {
+                assert!(
+                    fs.log_files.is_empty(),
+                    "RO via ReadOptions should strip log files"
+                );
+            }
+
+            let default_slices = hudi_table.get_file_slices(&ReadOptions::new()).await?;
+            assert!(
+                default_slices.iter().any(|fs| fs.has_log_file()),
+                "Without RO, MOR slices should have log files"
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn test_non_partitioned_rollback() -> Result<()> {
             let base_url = SampleTable::V6NonpartitionedRollback.url_to_mor_parquet();
             let hudi_table = Table::new(base_url.path()).await?;
