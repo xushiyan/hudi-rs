@@ -221,18 +221,21 @@ impl FileSystemView {
                 let stats = StatisticsContainer::from_parquet_metadata(&parquet_meta, table_schema);
 
                 if file_pruner.should_include(&stats) {
-                    let num_records = parquet_meta.file_metadata().num_rows();
-                    let (on_disk, byte_size) = parquet_meta
+                    let num_records = parquet_meta.file_metadata().num_rows().max(0);
+                    let byte_size: i64 = parquet_meta
                         .row_groups()
                         .iter()
-                        .fold((0i64, 0i64), |(d, b), rg| {
-                            (d + rg.compressed_size(), b + rg.total_byte_size())
-                        });
+                        .map(|rg| rg.total_byte_size())
+                        .sum::<i64>()
+                        .max(0);
+                    // Preserve existing on-disk size from MDT/estimator if available;
+                    // the footer only gives row group data sizes, not the full file size.
+                    let existing = fsl.base_file.file_metadata.take().unwrap_or_default();
                     fsl.base_file.file_metadata = Some(FileMetadata {
                         name: fsl.base_file.file_name(),
-                        size: on_disk.max(0) as u64,
-                        byte_size: byte_size.max(0),
-                        num_records: num_records.max(0),
+                        size: existing.size,
+                        byte_size,
+                        num_records,
                     });
                     fsl.base_file_column_stats = Some(stats);
                     retained.push(fg);
