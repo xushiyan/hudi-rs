@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
+use crate::config::HudiConfigs;
 use crate::config::error::ConfigError;
 use crate::config::read::HudiReadConfig;
 pub use crate::config::read::QueryType;
@@ -249,6 +250,33 @@ impl ReadOptions {
     /// Errors if the stored string is not a valid `usize` or if the value is `0`
     /// (a zero-row batch yields no batches at the parquet stream reader and is
     /// almost certainly a caller mistake).
+    /// Fill in defaults from the given configs for keys not already set.
+    ///
+    /// Values already present in this `ReadOptions` take precedence.
+    /// Applicable configs: `UseReadOptimizedMode`, `StreamBatchSize`.
+    pub fn with_defaults_from(&self, configs: &HudiConfigs) -> Self {
+        let mut resolved = self.clone();
+        let ro_key = HudiReadConfig::UseReadOptimizedMode.as_ref();
+        if !resolved.hudi_options.contains_key(ro_key) {
+            let v: bool = configs
+                .get_or_default(HudiReadConfig::UseReadOptimizedMode)
+                .into();
+            resolved
+                .hudi_options
+                .insert(ro_key.to_string(), v.to_string());
+        }
+        let bs_key = HudiReadConfig::StreamBatchSize.as_ref();
+        if !resolved.hudi_options.contains_key(bs_key) {
+            let v: usize = configs
+                .get_or_default(HudiReadConfig::StreamBatchSize)
+                .into();
+            resolved
+                .hudi_options
+                .insert(bs_key.to_string(), v.to_string());
+        }
+        resolved
+    }
+
     pub fn batch_size(&self) -> crate::Result<Option<usize>> {
         let key = HudiReadConfig::StreamBatchSize.as_ref();
         match self.hudi_options.get(key) {

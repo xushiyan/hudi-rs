@@ -106,33 +106,8 @@ impl FileGroupReader {
         })
     }
 
-    /// Resolve read options by filling in reader-level defaults.
-    ///
-    /// ReadOptions values take precedence; reader-level configs are used only
-    /// when the key is absent from the options.
     fn resolve_read_options(&self, options: &ReadOptions) -> ReadOptions {
-        let mut resolved = options.clone();
-        let ro_str = HudiReadConfig::UseReadOptimizedMode.as_ref();
-        if !resolved.hudi_options.contains_key(ro_str) {
-            let v: bool = self
-                .hudi_configs
-                .get_or_default(HudiReadConfig::UseReadOptimizedMode)
-                .into();
-            resolved
-                .hudi_options
-                .insert(ro_str.to_string(), v.to_string());
-        }
-        let bs_str = HudiReadConfig::StreamBatchSize.as_ref();
-        if !resolved.hudi_options.contains_key(bs_str) {
-            let v: usize = self
-                .hudi_configs
-                .get_or_default(HudiReadConfig::StreamBatchSize)
-                .into();
-            resolved
-                .hudi_options
-                .insert(bs_str.to_string(), v.to_string());
-        }
-        resolved
+        options.with_defaults_from(&self.hudi_configs)
     }
 
     /// Internal: read base file + apply commit-time filter, no [`ReadOptions`] applied.
