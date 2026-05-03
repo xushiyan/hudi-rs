@@ -128,15 +128,13 @@ impl HudiDataSource {
             .into_iter()
             .map(|(k, v)| (k.as_ref().to_string(), v.into()))
             .collect();
-        if !all_options
-            .iter()
-            .any(|(k, _)| k == UseReadOptimizedMode.as_ref())
-        {
-            all_options.push((
-                UseReadOptimizedMode.as_ref().to_string(),
-                "true".to_string(),
-            ));
-        }
+        // DataFusion reads base files only via ParquetSource �� MOR log merging
+        // is not implemented. Force read-optimized mode regardless of caller input.
+        all_options.retain(|(k, _)| k != UseReadOptimizedMode.as_ref());
+        all_options.push((
+            UseReadOptimizedMode.as_ref().to_string(),
+            "true".to_string(),
+        ));
         let table = HudiTable::new_with_options(base_uri, all_options)
             .await
             .map_err(|e| Execution(format!("Failed to create Hudi table: {e}")))?;
