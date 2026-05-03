@@ -266,9 +266,9 @@ impl ReadOptions {
         let key = HudiReadConfig::UseReadOptimizedMode.as_ref();
         match self.hudi_options.get(key) {
             Some(s) => {
-                let parsed = s.parse::<bool>().map_err(|e| {
-                    ConfigError::ParseBool(key.to_string(), s.clone(), e)
-                })?;
+                let parsed = s
+                    .parse::<bool>()
+                    .map_err(|e| ConfigError::ParseBool(key.to_string(), s.clone(), e))?;
                 Ok(parsed)
             }
             None => Ok(false),
@@ -433,7 +433,10 @@ mod tests {
             let opts = ReadOptions::new()
                 .with_hudi_option(HudiReadConfig::UseReadOptimizedMode.as_ref(), invalid);
             let err = opts.is_read_optimized().unwrap_err();
-            assert!(err.to_string().contains(invalid), "expected error to mention '{invalid}'");
+            assert!(
+                err.to_string().contains(invalid),
+                "expected error to mention '{invalid}'"
+            );
         }
         Ok(())
     }
