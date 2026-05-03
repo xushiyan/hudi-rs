@@ -371,9 +371,20 @@ impl TableProvider for HudiDataSource {
             .cloned()
             .collect();
         let pushdown_filters = exprs_to_filters(&partition_filters);
-        let read_options = ReadOptions::new()
+        let use_read_optimized: bool = self
+            .table
+            .hudi_configs
+            .get_or_default(UseReadOptimizedMode)
+            .into();
+        let mut read_options = ReadOptions::new()
             .with_filters(pushdown_filters)
             .map_err(|e| Execution(format!("Invalid pushdown filter: {e}")))?;
+        if use_read_optimized {
+            read_options = read_options.with_hudi_option(
+                UseReadOptimizedMode.as_ref(),
+                "true",
+            );
+        }
         let flat_slices = self
             .table
             .get_file_slices(&read_options)
