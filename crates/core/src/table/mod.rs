@@ -432,35 +432,28 @@ impl Table {
     /// [`crate::util::collection::split_into_chunks`] or your engine's preferred
     /// partitioning policy.
     pub async fn get_file_slices(&self, options: &ReadOptions) -> Result<Vec<FileSlice>> {
-        let mut file_slices = match options.query_type()? {
-            QueryType::Snapshot => self.get_snapshot_file_slices(options).await,
-            QueryType::Incremental => self.get_incremental_file_slices(options).await,
-        }?;
-
-        if options.is_read_optimized() {
-            for fs in &mut file_slices {
-                fs.log_files.clear();
+        let base_file_only = !self.is_mor() || options.is_read_optimized();
+        match options.query_type()? {
+            QueryType::Snapshot => {
+                let Some(timestamp) = self.resolve_snapshot_timestamp(options)? else {
+                    return Ok(Vec::new());
+                };
+                self.get_file_slices_inner(&timestamp, &options.filters, base_file_only)
+                    .await
+            }
+            QueryType::Incremental => {
+                let Some((start, end)) = self.resolve_incremental_range(options)? else {
+                    return Ok(Vec::new());
+                };
+                self.get_file_slices_between_inner(
+                    &start,
+                    &end,
+                    &options.filters,
+                    base_file_only,
+                )
+                .await
             }
         }
-
-        Ok(file_slices)
-    }
-
-    async fn get_snapshot_file_slices(&self, options: &ReadOptions) -> Result<Vec<FileSlice>> {
-        let Some(timestamp) = self.resolve_snapshot_timestamp(options)? else {
-            return Ok(Vec::new());
-        };
-        let base_file_only = !self.is_mor() || options.is_read_optimized();
-        self.get_file_slices_inner(&timestamp, &options.filters, base_file_only)
-            .await
-    }
-
-    async fn get_incremental_file_slices(&self, options: &ReadOptions) -> Result<Vec<FileSlice>> {
-        let Some((start, end)) = self.resolve_incremental_range(options)? else {
-            return Ok(Vec::new());
-        };
-        self.get_file_slices_between_inner(&start, &end, &options.filters)
-            .await
     }
 
     async fn get_file_slices_inner(
@@ -511,7 +504,8 @@ impl Table {
         // and fallback storage listing.
         let estimator = self.get_or_init_estimator(timestamp).await;
 
-        self.file_system_view
+        let mut file_slices = self
+            .file_system_view
             .get_file_slices(
                 &partition_pruner,
                 &file_pruner,
@@ -520,7 +514,14 @@ impl Table {
                 metadata_table,
                 estimator,
             )
-            .await
+            .await?;
+
+        if base_file_only {
+            for fs in &mut file_slices {
+                fs.log_files.clear();
+            }
+        }
+        Ok(file_slices)
     }
 
     async fn get_file_slices_between_inner(
@@ -528,6 +529,7 @@ impl Table {
         start_timestamp: &str,
         end_timestamp: &str,
         filters: &[Filter],
+        base_file_only: bool,
     ) -> Result<Vec<FileSlice>> {
         // Seed the cached estimator from a sample base file at or before
         // end_timestamp so the file group builder can populate FileMetadata
@@ -567,6 +569,11 @@ impl Table {
             }
         }
 
+        if base_file_only {
+            for fs in &mut file_slices {
+                fs.log_files.clear();
+            }
+        }
         Ok(file_slices)
     }
 
@@ -698,8 +705,9 @@ impl Table {
         let Some((start, end)) = self.resolve_incremental_range(options)? else {
             return Ok(Vec::new());
         };
+        let base_file_only = !self.is_mor() || options.is_read_optimized();
         let file_slices = self
-            .get_file_slices_between_inner(&start, &end, &options.filters)
+            .get_file_slices_between_inner(&start, &end, &options.filters, base_file_only)
             .await?;
 
         let fg_reader = self.create_file_group_reader_with_options(
