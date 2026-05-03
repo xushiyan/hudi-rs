@@ -779,11 +779,10 @@ impl HudiTable {
         })
     }
 
-    #[pyo3(signature = (read_options=None, extra_hudi_overrides=None, extra_storage_overrides=None))]
+    #[pyo3(signature = (read_options=None, extra_storage_overrides=None))]
     fn create_file_group_reader_with_options(
         &self,
         read_options: Option<HudiReadOptions>,
-        extra_hudi_overrides: Option<HashMap<String, String>>,
         extra_storage_overrides: Option<HashMap<String, String>>,
     ) -> PyResult<HudiFileGroupReader> {
         let read_options = read_options.map(|o| o.to_inner());
@@ -791,7 +790,6 @@ impl HudiTable {
             .inner
             .create_file_group_reader_with_options(
                 read_options.as_ref(),
-                extra_hudi_overrides.unwrap_or_default(),
                 extra_storage_overrides.unwrap_or_default(),
             )
             .map_err(PythonError::from)?;

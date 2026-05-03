@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use arrow_schema::Schema;
 
 use crate::Result;
-use crate::config::read::HudiReadConfig;
+use crate::table::ReadOptions;
 use crate::config::table::HudiTableConfig::{
     MetadataTableEnabled, MetadataTablePartitions, PartitionFields, TableVersion,
 };
@@ -258,9 +258,9 @@ impl Table {
         }
 
         let file_slice = file_slices.into_iter().next().unwrap();
+        let opts = ReadOptions::new().with_end_timestamp(timestamp);
         let fg_reader = self.create_file_group_reader_with_options(
-            None,
-            [(HudiReadConfig::EndTimestamp, timestamp)],
+            Some(&opts),
             std::iter::empty::<(&str, &str)>(),
         )?;
 

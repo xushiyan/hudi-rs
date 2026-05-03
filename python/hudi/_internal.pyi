@@ -389,7 +389,6 @@ class HudiTable:
     def create_file_group_reader_with_options(
         self,
         read_options: Optional[HudiReadOptions] = None,
-        extra_hudi_overrides: Optional[Dict[str, str]] = None,
         extra_storage_overrides: Optional[Dict[str, str]] = None,
     ) -> HudiFileGroupReader:
         """

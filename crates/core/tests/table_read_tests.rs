@@ -674,7 +674,6 @@ mod v8_tables {
             let fg_reader = hudi_table.create_file_group_reader_with_options(
                 None,
                 std::iter::empty::<(&str, &str)>(),
-                std::iter::empty::<(&str, &str)>(),
             )?;
             // Sanity: read the merged slice unfiltered so we can pick a rider
             // present in this slice and assert the filter actually narrows it.
@@ -838,7 +837,6 @@ mod v8_tables {
             let fg_reader = hudi_table.create_file_group_reader_with_options(
                 None,
                 std::iter::empty::<(&str, &str)>(),
-                std::iter::empty::<(&str, &str)>(),
             )?;
             let options = ReadOptions::new();
             let file_slice = &file_slices[0];
@@ -870,7 +868,6 @@ mod v8_tables {
 
             let fg_reader = hudi_table.create_file_group_reader_with_options(
                 None,
-                std::iter::empty::<(&str, &str)>(),
                 std::iter::empty::<(&str, &str)>(),
             )?;
             // Test with small batch size
@@ -1505,7 +1502,6 @@ mod v9_tables {
             let fg_reader = hudi_table.create_file_group_reader_with_options(
                 None,
                 std::iter::empty::<(&str, &str)>(),
-                std::iter::empty::<(&str, &str)>(),
             )?;
             let options = ReadOptions::new();
             let file_slice = &file_slices[0];
@@ -1529,7 +1525,6 @@ mod v9_tables {
 
             let fg_reader = hudi_table.create_file_group_reader_with_options(
                 None,
-                std::iter::empty::<(&str, &str)>(),
                 std::iter::empty::<(&str, &str)>(),
             )?;
             let options = ReadOptions::new().with_batch_size(1)?;
@@ -1698,7 +1693,6 @@ mod streaming_queries {
         let fg_reader = hudi_table.create_file_group_reader_with_options(
             None,
             std::iter::empty::<(&str, &str)>(),
-            std::iter::empty::<(&str, &str)>(),
         )?;
         let options = ReadOptions::new();
         let file_slice = &file_slices[0];
@@ -1725,7 +1719,6 @@ mod streaming_queries {
 
         let fg_reader = hudi_table.create_file_group_reader_with_options(
             None,
-            std::iter::empty::<(&str, &str)>(),
             std::iter::empty::<(&str, &str)>(),
         )?;
         // Test with small batch size

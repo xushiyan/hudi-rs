@@ -612,26 +612,19 @@ impl Table {
     /// **Storage options** (last-writer-wins):
     /// 1. Table-level storage options (cloud credentials, endpoints, etc).
     /// 2. `extra_storage_overrides` — caller-supplied per-path storage overrides.
-    pub fn create_file_group_reader_with_options<H, S, K1, V1, K2, V2>(
+    pub fn create_file_group_reader_with_options<S, K, V>(
         &self,
         read_options: Option<&ReadOptions>,
-        extra_hudi_overrides: H,
         extra_storage_overrides: S,
     ) -> Result<FileGroupReader>
     where
-        H: IntoIterator<Item = (K1, V1)>,
-        K1: AsRef<str>,
-        V1: Into<String>,
-        S: IntoIterator<Item = (K2, V2)>,
-        K2: AsRef<str>,
-        V2: Into<String>,
+        S: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: Into<String>,
     {
-        let mut hudi_opts: HashMap<String, String> = read_options
+        let hudi_opts: HashMap<String, String> = read_options
             .map(|opts| opts.hudi_options.clone())
             .unwrap_or_default();
-        for (k, v) in extra_hudi_overrides {
-            hudi_opts.insert(k.as_ref().to_string(), v.into());
-        }
 
         let mut storage_opts: HashMap<String, String> =
             HashMap::with_capacity(self.storage_options.len());
@@ -682,18 +675,16 @@ impl Table {
         Ok(batches)
     }
 
-    /// Build a `FileGroupReader` for a snapshot read with the resolved snapshot
-    /// bound injected as `EndTimestamp`. The Table-owned read keys in
-    /// `options.hudi_options` (notably any stray incremental `StartTimestamp`)
-    /// are dropped by [`Self::create_file_group_reader_with_options`].
     fn create_file_group_reader_for_snapshot(
         &self,
         options: &ReadOptions,
         snapshot_timestamp: &str,
     ) -> Result<FileGroupReader> {
+        let opts = options
+            .clone()
+            .with_end_timestamp(snapshot_timestamp);
         self.create_file_group_reader_with_options(
-            Some(options),
-            [(HudiReadConfig::EndTimestamp, snapshot_timestamp.to_string())],
+            Some(&opts),
             std::iter::empty::<(&str, &str)>(),
         )
     }
@@ -707,12 +698,12 @@ impl Table {
             .get_file_slices_between_inner(&start, &end, &options.filters, base_file_only)
             .await?;
 
+        let fg_opts = options
+            .clone()
+            .with_start_timestamp(&start)
+            .with_end_timestamp(&end);
         let fg_reader = self.create_file_group_reader_with_options(
-            Some(options),
-            [
-                (HudiReadConfig::StartTimestamp, start),
-                (HudiReadConfig::EndTimestamp, end),
-            ],
+            Some(&fg_opts),
             std::iter::empty::<(&str, &str)>(),
         )?;
         let fg_options = self.options_for_file_group(options);
@@ -1386,7 +1377,7 @@ mod tests {
         let base_url = SampleTable::V6Nonpartitioned.url_to_cow();
         let hudi_table = Table::new(base_url.path()).await.unwrap();
         let batches = hudi_table
-            .create_file_group_reader_with_options(None, empty_options(), empty_options())
+            .create_file_group_reader_with_options(None, empty_options())
             .unwrap()
             .read_file_slice_from_paths(
                 "a079bdb3-731c-4894-b855-abfcd6921007-0_0-203-274_20240418173551906.parquet",
