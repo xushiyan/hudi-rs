@@ -935,22 +935,15 @@ impl Table {
     async fn compute_change_stats_inner(&self, options: &ReadOptions) -> Result<(u64, u64)> {
         let file_slices = self.get_file_slices(options).await?;
 
-        // Record count comes from the base file only. Log file records merge
-        // into the base file record batch, so the base file count represents
-        // the file slice's output. Log-only file groups (no base file) are not
-        // yet supported and contribute 0 records.
-        let total_records: u64 = file_slices
-            .iter()
-            .map(|fs| {
-                fs.base_file
-                    .file_metadata
-                    .as_ref()
-                    .map(|m| m.num_records.max(0) as u64)
-                    .unwrap_or(0)
-            })
-            .sum();
-
-        let total_bytes: u64 = file_slices.iter().map(|fs| fs.total_size_bytes()).sum();
+        // Both num_records and byte_size come from the base file only.
+        // The estimator populates these from the base file's on-disk size
+        // using sampled Parquet footer ratios, consistent with the snapshot path.
+        let (total_records, total_bytes) = file_slices.iter().fold((0u64, 0u64), |(r, b), fs| {
+            let m = fs.base_file.file_metadata.as_ref();
+            let records = m.map(|m| m.num_records.max(0) as u64).unwrap_or(0);
+            let bytes = m.map(|m| m.byte_size.max(0) as u64).unwrap_or(0);
+            (r + records, b + bytes)
+        });
         Ok((total_records, total_bytes))
     }
 }
