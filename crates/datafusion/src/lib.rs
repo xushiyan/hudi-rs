@@ -130,11 +130,18 @@ impl HudiDataSource {
             .into_iter()
             .map(|(k, v)| (k.as_ref().to_string(), v.into()))
             .collect();
-        let input_partitions: usize = all_options
+        let input_partitions: usize = match all_options
             .iter()
             .find(|(k, _)| k == InputPartitions.as_ref())
-            .and_then(|(_, v)| v.parse().ok())
-            .unwrap_or(0);
+        {
+            Some((_, v)) => v.parse().map_err(|_| {
+                Execution(format!(
+                    "Invalid value '{v}' for {}: expected a non-negative integer",
+                    InputPartitions.as_ref()
+                ))
+            })?,
+            None => 0,
+        };
         let table = HudiTable::new_with_options(base_uri, all_options)
             .await
             .map_err(|e| Execution(format!("Failed to create Hudi table: {e}")))?;
