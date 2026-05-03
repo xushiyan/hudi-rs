@@ -230,8 +230,8 @@ impl FileSystemView {
                     fsl.base_file.file_metadata = Some(FileMetadata {
                         name: fsl.base_file.file_name(),
                         size: on_disk.max(0) as u64,
-                        byte_size,
-                        num_records,
+                        byte_size: byte_size.max(0),
+                        num_records: num_records.max(0),
                     });
                     fsl.base_file_column_stats = Some(stats);
                     retained.push(fg);
