@@ -323,17 +323,38 @@ impl Table {
         self.table_type() == TableTypeValue::MergeOnRead.as_ref()
     }
 
+    /// Resolve read options by filling in applicable table-level defaults.
+    ///
+    /// ReadOptions values take precedence; table-level configs are used only
+    /// when the key is absent from the options. The resolved options become
+    /// the single source of truth for all downstream read behavior.
+    fn resolve_read_options(&self, options: &ReadOptions) -> ReadOptions {
+        let mut resolved = options.clone();
+        let ro_str = HudiReadConfig::UseReadOptimizedMode.as_ref();
+        if !resolved.hudi_options.contains_key(ro_str) {
+            let v: bool = self
+                .hudi_configs
+                .get_or_default(HudiReadConfig::UseReadOptimizedMode)
+                .into();
+            resolved
+                .hudi_options
+                .insert(ro_str.to_string(), v.to_string());
+        }
+        let bs_str = HudiReadConfig::StreamBatchSize.as_ref();
+        if !resolved.hudi_options.contains_key(bs_str) {
+            let v: usize = self
+                .hudi_configs
+                .get_or_default(HudiReadConfig::StreamBatchSize)
+                .into();
+            resolved
+                .hudi_options
+                .insert(bs_str.to_string(), v.to_string());
+        }
+        resolved
+    }
+
     fn is_base_file_only(&self, options: &ReadOptions) -> bool {
-        if !self.is_mor() {
-            return true;
-        }
-        // ReadOptions override takes precedence over table-level config.
-        if let Some(ro) = options.read_optimized_override() {
-            return ro;
-        }
-        self.hudi_configs
-            .get_or_default(HudiReadConfig::UseReadOptimizedMode)
-            .into()
+        !self.is_mor() || options.is_read_optimized()
     }
 
     pub fn timezone(&self) -> String {
@@ -445,17 +466,18 @@ impl Table {
     /// [`crate::util::collection::split_into_chunks`] or your engine's preferred
     /// partitioning policy.
     pub async fn get_file_slices(&self, options: &ReadOptions) -> Result<Vec<FileSlice>> {
-        let base_file_only = self.is_base_file_only(options);
+        let options = self.resolve_read_options(options);
+        let base_file_only = self.is_base_file_only(&options);
         match options.query_type()? {
             QueryType::Snapshot => {
-                let Some(timestamp) = self.resolve_snapshot_timestamp(options)? else {
+                let Some(timestamp) = self.resolve_snapshot_timestamp(&options)? else {
                     return Ok(Vec::new());
                 };
                 self.get_file_slices_inner(&timestamp, &options.filters, base_file_only)
                     .await
             }
             QueryType::Incremental => {
-                let Some((start, end)) = self.resolve_incremental_range(options)? else {
+                let Some((start, end)) = self.resolve_incremental_range(&options)? else {
                     return Ok(Vec::new());
                 };
                 self.get_file_slices_between_inner(
@@ -673,9 +695,10 @@ impl Table {
     /// for the full breakdown. `options.hudi_options` override table-level Hudi configs
     /// for this single read.
     pub async fn read(&self, options: &ReadOptions) -> Result<Vec<RecordBatch>> {
+        let options = self.resolve_read_options(options);
         match options.query_type()? {
-            QueryType::Snapshot => self.read_snapshot_inner(options).await,
-            QueryType::Incremental => self.read_incremental_inner(options).await,
+            QueryType::Snapshot => self.read_snapshot_inner(&options).await,
+            QueryType::Incremental => self.read_incremental_inner(&options).await,
         }
     }
 
@@ -835,8 +858,9 @@ impl Table {
         &self,
         options: &ReadOptions,
     ) -> Result<futures::stream::BoxStream<'static, Result<RecordBatch>>> {
+        let options = self.resolve_read_options(options);
         match options.query_type()? {
-            QueryType::Snapshot => self.read_snapshot_stream_inner(options).await,
+            QueryType::Snapshot => self.read_snapshot_stream_inner(&options).await,
             QueryType::Incremental => Err(CoreError::Unsupported(
                 "Streaming for incremental queries is not yet supported".to_string(),
             )),
