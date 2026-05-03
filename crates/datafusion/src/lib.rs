@@ -124,7 +124,20 @@ impl HudiDataSource {
         K: AsRef<str>,
         V: Into<String>,
     {
-        let table = HudiTable::new_with_options(base_uri, options)
+        let mut all_options: Vec<(String, String)> = options
+            .into_iter()
+            .map(|(k, v)| (k.as_ref().to_string(), v.into()))
+            .collect();
+        if !all_options
+            .iter()
+            .any(|(k, _)| k == UseReadOptimizedMode.as_ref())
+        {
+            all_options.push((
+                UseReadOptimizedMode.as_ref().to_string(),
+                "true".to_string(),
+            ));
+        }
+        let table = HudiTable::new_with_options(base_uri, all_options)
             .await
             .map_err(|e| Execution(format!("Failed to create Hudi table: {e}")))?;
 
@@ -336,22 +349,6 @@ impl TableProvider for HudiDataSource {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         self.table.register_storage(state.runtime_env().clone());
-
-        // Only support COW tables, or MOR tables with read-optimized mode enabled.
-        if self.table.is_mor() {
-            let use_read_optimized: bool = self
-                .table
-                .hudi_configs
-                .get_or_default(UseReadOptimizedMode)
-                .into();
-            if !use_read_optimized {
-                return Err(Execution(
-                    "MOR table is not supported without read-optimized mode. \
-                     Set hoodie.read.use.read_optimized.mode=true to read only base files."
-                        .to_string(),
-                ));
-            }
-        }
 
         // Resolve input partitions: use Hudi config if set, otherwise fall back
         // to DataFusion's target_partitions (defaults to number of CPU cores).
