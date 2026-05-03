@@ -106,6 +106,35 @@ impl FileGroupReader {
         })
     }
 
+    /// Resolve read options by filling in reader-level defaults.
+    ///
+    /// ReadOptions values take precedence; reader-level configs are used only
+    /// when the key is absent from the options.
+    fn resolve_read_options(&self, options: &ReadOptions) -> ReadOptions {
+        let mut resolved = options.clone();
+        let ro_str = HudiReadConfig::UseReadOptimizedMode.as_ref();
+        if !resolved.hudi_options.contains_key(ro_str) {
+            let v: bool = self
+                .hudi_configs
+                .get_or_default(HudiReadConfig::UseReadOptimizedMode)
+                .into();
+            resolved
+                .hudi_options
+                .insert(ro_str.to_string(), v.to_string());
+        }
+        let bs_str = HudiReadConfig::StreamBatchSize.as_ref();
+        if !resolved.hudi_options.contains_key(bs_str) {
+            let v: usize = self
+                .hudi_configs
+                .get_or_default(HudiReadConfig::StreamBatchSize)
+                .into();
+            resolved
+                .hudi_options
+                .insert(bs_str.to_string(), v.to_string());
+        }
+        resolved
+    }
+
     /// Internal: read base file + apply commit-time filter, no [`ReadOptions`] applied.
     /// Used by the merge path so options aren't applied prematurely before merging
     /// with log files.
@@ -172,15 +201,12 @@ impl FileGroupReader {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        let options = self.resolve_read_options(options);
         let log_file_paths: Vec<String> = log_file_paths
             .into_iter()
             .map(|s| s.as_ref().to_string())
             .collect();
-        let use_read_optimized: bool = self
-            .hudi_configs
-            .get_or_default(HudiReadConfig::UseReadOptimizedMode)
-            .into();
-        let base_file_only = log_file_paths.is_empty() || use_read_optimized;
+        let base_file_only = log_file_paths.is_empty() || options.is_read_optimized();
 
         let merged = if base_file_only {
             self.read_base_file_eager(base_file_path).await?
@@ -213,7 +239,7 @@ impl FileGroupReader {
             merger.merge_record_batches(all_batches)?
         };
 
-        apply_eager_options(options, merged)
+        apply_eager_options(&options, merged)
     }
 
     // =========================================================================
@@ -293,13 +319,9 @@ impl FileGroupReader {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let use_read_optimized: bool = self
-            .hudi_configs
-            .get_or_default(HudiReadConfig::UseReadOptimizedMode)
-            .into();
-
-        if use_read_optimized {
-            return self.read_base_file_stream(base_file_path, options).await;
+        let options = self.resolve_read_options(options);
+        if options.is_read_optimized() {
+            return self.read_base_file_stream(base_file_path, &options).await;
         }
 
         let log_file_paths: Vec<String> = log_file_paths
@@ -308,11 +330,11 @@ impl FileGroupReader {
             .collect();
 
         if log_file_paths.is_empty() {
-            self.read_base_file_stream(base_file_path, options).await
+            self.read_base_file_stream(base_file_path, &options).await
         } else {
             // Fallback: collect + merge, then yield as single-item stream
             let batch = self
-                .read_file_slice_from_paths(base_file_path, log_file_paths, options)
+                .read_file_slice_from_paths(base_file_path, log_file_paths, &options)
                 .await?;
             Ok(Box::pin(futures::stream::once(async { Ok(batch) })))
         }
