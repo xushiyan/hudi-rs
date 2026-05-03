@@ -23,7 +23,7 @@
 //! **Example**
 //!
 //! ```rust
-//! use hudi_core::config::table::HudiTableConfig::InputPartitions;
+//! use hudi_core::config::read::HudiReadConfig::InputPartitions;
 //! use hudi_core::table::Table as HudiTable;
 //!
 //! # #[tokio::main]

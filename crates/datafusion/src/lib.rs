@@ -47,7 +47,7 @@ use datafusion_physical_expr::create_physical_expr;
 use log::warn;
 
 use crate::util::expr::exprs_to_filters;
-use hudi_core::config::read::HudiReadConfig::UseReadOptimizedMode;
+use hudi_core::config::read::HudiReadConfig::{InputPartitions, UseReadOptimizedMode};
 use hudi_core::config::table::{BaseFileFormatValue, HudiTableConfig};
 use hudi_core::config::util::empty_options;
 use hudi_core::storage::util::{get_scheme_authority, join_url_segments};
@@ -94,6 +94,8 @@ pub struct HudiDataSource {
     partition_schema: Schema,
     /// Cached table-level statistics for join ordering and broadcast decisions.
     cached_stats: Option<Statistics>,
+    /// Number of input partitions for scan planning, extracted from read options.
+    input_partitions: usize,
 }
 
 impl std::fmt::Debug for HudiDataSource {
@@ -124,7 +126,16 @@ impl HudiDataSource {
         K: AsRef<str>,
         V: Into<String>,
     {
-        let table = HudiTable::new_with_options(base_uri, options)
+        let all_options: Vec<(String, String)> = options
+            .into_iter()
+            .map(|(k, v)| (k.as_ref().to_string(), v.into()))
+            .collect();
+        let input_partitions: usize = all_options
+            .iter()
+            .find(|(k, _)| k == InputPartitions.as_ref())
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(0);
+        let table = HudiTable::new_with_options(base_uri, all_options)
             .await
             .map_err(|e| Execution(format!("Failed to create Hudi table: {e}")))?;
 
@@ -185,14 +196,12 @@ impl HudiDataSource {
             schema,
             partition_schema,
             cached_stats,
+            input_partitions,
         })
     }
 
     fn get_input_partitions(&self) -> usize {
-        self.table
-            .hudi_configs
-            .get_or_default(HudiTableConfig::InputPartitions)
-            .into()
+        self.input_partitions
     }
 
     /// Check if the given expression can be pushed down to the Hudi table.

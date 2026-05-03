@@ -122,7 +122,7 @@ def test_with_hudi_option_enum(builder):
     builder.with_hudi_option(HudiTableConfig.TABLE_NAME, "test_table")
     assert builder.hudi_options["hoodie.table.name"] == "test_table"
 
-    builder.with_hudi_option(HudiTableConfig.INPUT_PARTITIONS, "5")
+    builder.with_hudi_option(HudiReadConfig.INPUT_PARTITIONS, "5")
     assert builder.hudi_options["hoodie.read.input.partitions"] == "5"
 
 
@@ -131,7 +131,7 @@ def test_with_option_enum(builder):
     builder.with_option(HudiTableConfig.BASE_FILE_FORMAT, "parquet")
     assert builder.options["hoodie.table.base.file.format"] == "parquet"
 
-    builder.with_option(HudiTableConfig.LISTING_PARALLELISM, "10")
+    builder.with_option(HudiReadConfig.LISTING_PARALLELISM, "10")
     assert builder.options["hoodie.read.listing.parallelism"] == "10"
 
 
@@ -141,8 +141,8 @@ def test_enum_values_match_expected_strings():
     assert HudiTableConfig.TABLE_TYPE.value == "hoodie.table.type"
     assert HudiTableConfig.BASE_FILE_FORMAT.value == "hoodie.table.base.file.format"
 
-    assert HudiTableConfig.INPUT_PARTITIONS.value == "hoodie.read.input.partitions"
-    assert HudiTableConfig.LISTING_PARALLELISM.value == "hoodie.read.listing.parallelism"
+    assert HudiReadConfig.INPUT_PARTITIONS.value == "hoodie.read.input.partitions"
+    assert HudiReadConfig.LISTING_PARALLELISM.value == "hoodie.read.listing.parallelism"
     assert (
         HudiReadConfig.USE_READ_OPTIMIZED_MODE.value
         == "hoodie.read.use.read_optimized.mode"
