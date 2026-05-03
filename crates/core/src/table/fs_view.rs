@@ -239,6 +239,7 @@ impl FileSystemView {
                         byte_size,
                         num_records,
                     });
+                    fsl.base_file_column_stats = Some(stats);
                     retained.push(fg);
                 } else {
                     log::debug!("Pruned file {relative_path} based on column stats");

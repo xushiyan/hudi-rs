@@ -20,6 +20,7 @@ use crate::Result;
 use crate::error::CoreError;
 use crate::file_group::base_file::BaseFile;
 use crate::file_group::log_file::LogFile;
+use crate::statistics::StatisticsContainer;
 use std::collections::BTreeSet;
 use std::fmt::Display;
 use std::path::PathBuf;
@@ -31,6 +32,11 @@ pub struct FileSlice {
     pub base_file: BaseFile,
     pub log_files: BTreeSet<LogFile>,
     pub partition_path: String,
+    /// Column statistics from the base file's Parquet footer.
+    ///
+    /// Populated when data-column filters trigger footer-based pruning
+    /// on COW tables or MOR read-optimized mode. `None` otherwise.
+    pub base_file_column_stats: Option<StatisticsContainer>,
 }
 
 impl Display for FileSlice {
@@ -57,6 +63,7 @@ impl FileSlice {
             base_file,
             log_files: BTreeSet::new(),
             partition_path,
+            base_file_column_stats: None,
         }
     }
 
@@ -169,12 +176,14 @@ mod tests {
             base_file: base.clone(),
             log_files: log_set1,
             partition_path: EMPTY_PARTITION_PATH.to_string(),
+            base_file_column_stats: None,
         };
 
         let slice2 = FileSlice {
             base_file: base,
             log_files: log_set2,
             partition_path: EMPTY_PARTITION_PATH.to_string(),
+            base_file_column_stats: None,
         };
 
         slice1.merge(&slice2)?;
@@ -207,6 +216,7 @@ mod tests {
             )?,
             log_files: BTreeSet::new(),
             partition_path: EMPTY_PARTITION_PATH.to_string(),
+            base_file_column_stats: None,
         };
 
         let slice2 = FileSlice {
@@ -215,6 +225,7 @@ mod tests {
             )?,
             log_files: BTreeSet::new(),
             partition_path: EMPTY_PARTITION_PATH.to_string(),
+            base_file_column_stats: None,
         };
 
         // Should return error for different base files
@@ -232,12 +243,14 @@ mod tests {
             base_file: base.clone(),
             log_files: BTreeSet::new(),
             partition_path: "path/to/partition1".to_string(),
+            base_file_column_stats: None,
         };
 
         let slice2 = FileSlice {
             base_file: base,
             log_files: BTreeSet::new(),
             partition_path: "path/to/partition2".to_string(),
+            base_file_column_stats: None,
         };
 
         // Should return error for different partition paths
@@ -270,6 +283,7 @@ mod tests {
             base_file: make_base_file_with_metadata(1000),
             log_files: BTreeSet::new(),
             partition_path: EMPTY_PARTITION_PATH.to_string(),
+            base_file_column_stats: None,
         };
         assert_eq!(slice.total_size_bytes(), 1000);
     }
@@ -283,6 +297,7 @@ mod tests {
             base_file: make_base_file_with_metadata(1000),
             log_files: logs,
             partition_path: EMPTY_PARTITION_PATH.to_string(),
+            base_file_column_stats: None,
         };
         assert_eq!(slice.total_size_bytes(), 1500);
     }
@@ -296,6 +311,7 @@ mod tests {
             base_file: make_base_file_with_metadata(1000),
             log_files: logs,
             partition_path: EMPTY_PARTITION_PATH.to_string(),
+            base_file_column_stats: None,
         };
         assert_eq!(slice.total_size_bytes(), 1200);
     }
@@ -313,6 +329,7 @@ mod tests {
             base_file: bf,
             log_files: logs,
             partition_path: EMPTY_PARTITION_PATH.to_string(),
+            base_file_column_stats: None,
         };
         assert_eq!(slice.total_size_bytes(), 0);
     }
