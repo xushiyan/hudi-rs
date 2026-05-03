@@ -435,17 +435,20 @@ impl Table {
     /// [`crate::util::collection::split_into_chunks`] or your engine's preferred
     /// partitioning policy.
     pub async fn get_file_slices(&self, options: &ReadOptions) -> Result<Vec<FileSlice>> {
-        let base_file_only = self.is_base_file_only(options);
         match options.query_type()? {
             QueryType::Snapshot => {
-                let Some(timestamp) = self.resolve_snapshot_timestamp(options)? else {
+                let options = options.for_snapshot();
+                let base_file_only = self.is_base_file_only(&options);
+                let Some(timestamp) = self.resolve_snapshot_timestamp(&options)? else {
                     return Ok(Vec::new());
                 };
                 self.get_file_slices_inner(&timestamp, &options.filters, base_file_only)
                     .await
             }
             QueryType::Incremental => {
-                let Some((start, end)) = self.resolve_incremental_range(options)? else {
+                let options = options.for_incremental();
+                let base_file_only = self.is_base_file_only(&options);
+                let Some((start, end)) = self.resolve_incremental_range(&options)? else {
                     return Ok(Vec::new());
                 };
                 self.get_file_slices_between_inner(&start, &end, &options.filters, base_file_only)
@@ -618,8 +621,11 @@ impl Table {
     /// for this single read.
     pub async fn read(&self, options: &ReadOptions) -> Result<Vec<RecordBatch>> {
         match options.query_type()? {
-            QueryType::Snapshot => self.read_snapshot_inner(options).await,
-            QueryType::Incremental => self.read_incremental_inner(options).await,
+            QueryType::Snapshot => self.read_snapshot_inner(&options.for_snapshot()).await,
+            QueryType::Incremental => {
+                self.read_incremental_inner(&options.for_incremental())
+                    .await
+            }
         }
     }
 
@@ -773,7 +779,10 @@ impl Table {
         options: &ReadOptions,
     ) -> Result<futures::stream::BoxStream<'static, Result<RecordBatch>>> {
         match options.query_type()? {
-            QueryType::Snapshot => self.read_snapshot_stream_inner(options).await,
+            QueryType::Snapshot => {
+                self.read_snapshot_stream_inner(&options.for_snapshot())
+                    .await
+            }
             QueryType::Incremental => Err(CoreError::Unsupported(
                 "Streaming for incremental queries is not yet supported".to_string(),
             )),

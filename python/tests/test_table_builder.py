@@ -94,14 +94,14 @@ def test_read_table_returns_correct_data(v8_trips_table):
     "hudi_options,storage_options,options",
     [
         (
-            {"hoodie.read.start.timestamp": "resolved value"},
-            {"hoodie.read.start.timestamp": "not taking"},
-            {"hoodie.read.start.timestamp": "lower precedence"},
+            {"hoodie.database.name": "resolved value"},
+            {"hoodie.database.name": "not taking"},
+            {"hoodie.database.name": "lower precedence"},
         ),
         (
             {},
-            {"hoodie.read.start.timestamp": "not taking"},
-            {"hoodie.read.start.timestamp": "resolved value"},
+            {"hoodie.database.name": "not taking"},
+            {"hoodie.database.name": "resolved value"},
         ),
     ],
 )
@@ -114,7 +114,7 @@ def test_setting_table_options(v8_trips_table, hudi_options, storage_options, op
         .build()
     )
 
-    assert table.hudi_options().get("hoodie.read.start.timestamp") == "resolved value"
+    assert table.hudi_options().get("hoodie.database.name") == "resolved value"
 
 
 def test_with_hudi_option_enum(builder):

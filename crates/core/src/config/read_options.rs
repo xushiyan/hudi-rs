@@ -240,6 +240,26 @@ impl ReadOptions {
             .map(|s| s.as_str())
     }
 
+    /// Return a copy with only snapshot-relevant timestamps (`as_of_timestamp`).
+    /// Strips `start_timestamp` and `end_timestamp` which are incremental-only.
+    pub fn for_snapshot(&self) -> Self {
+        let mut opts = self.clone();
+        opts.hudi_options
+            .remove(HudiReadConfig::StartTimestamp.as_ref());
+        opts.hudi_options
+            .remove(HudiReadConfig::EndTimestamp.as_ref());
+        opts
+    }
+
+    /// Return a copy with only incremental-relevant timestamps (`start_timestamp`,
+    /// `end_timestamp`). Strips `as_of_timestamp` which is snapshot-only.
+    pub fn for_incremental(&self) -> Self {
+        let mut opts = self.clone();
+        opts.hudi_options
+            .remove(HudiReadConfig::AsOfTimestamp.as_ref());
+        opts
+    }
+
     /// Whether read-optimized mode is enabled (base files only, skip log merging).
     pub fn is_read_optimized(&self) -> bool {
         self.hudi_options
