@@ -18,7 +18,7 @@
  */
 use crate::Result;
 use crate::config::HudiConfigs;
-use crate::config::read::HudiReadConfig::ListingParallelism;
+use crate::config::plan::HudiPlanConfig::ListingParallelism;
 use crate::config::table::HudiTableConfig::BaseFileFormat;
 use crate::error::CoreError;
 use crate::file_group::FileGroup;

@@ -30,6 +30,7 @@ use url::Url;
 
 pub mod error;
 pub mod internal;
+pub mod plan;
 pub mod read;
 pub mod read_options;
 pub mod table;

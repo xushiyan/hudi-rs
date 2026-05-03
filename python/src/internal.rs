@@ -31,6 +31,7 @@ use tokio::sync::Mutex;
 #[cfg(feature = "datafusion")]
 use datafusion::error::DataFusionError;
 
+use hudi::config::plan::HudiPlanConfig;
 use hudi::config::read::HudiReadConfig;
 use hudi::config::table::HudiTableConfig;
 use hudi::error::CoreError;
@@ -986,6 +987,7 @@ pub fn _config_keys() -> HashMap<String, Vec<(String, String)>> {
     let mut out = HashMap::new();
     out.insert("HudiTableConfig".to_string(), collect::<HudiTableConfig>());
     out.insert("HudiReadConfig".to_string(), collect::<HudiReadConfig>());
+    out.insert("HudiPlanConfig".to_string(), collect::<HudiPlanConfig>());
     out
 }
 
