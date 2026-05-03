@@ -543,7 +543,7 @@ impl HudiFileSlice {
     /// where each is a single-element PyArrow array or None.
     /// Only populated when data-column filters trigger footer-based pruning
     /// on COW tables or MOR read-optimized mode.
-    fn base_file_column_stats(&self, py: Python) -> PyResult<Option<PyObject>> {
+    fn base_file_column_stats(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         use pyo3::types::PyDict;
 
         let Some(stats) = &self.column_stats else {
