@@ -38,7 +38,7 @@ use url::Url;
 
 use crate::config::HudiConfigs;
 use crate::config::table::HudiTableConfig;
-use crate::statistics::StatisticsContainer;
+
 use crate::storage::error::StorageError::{Creation, InvalidPath};
 use crate::storage::error::{Result, StorageError};
 use crate::storage::file_metadata::FileMetadata;
@@ -210,22 +210,7 @@ impl Storage {
         )?)
     }
 
-    /// Get column statistics for a Parquet file.
-    ///
-    /// # Arguments
-    /// * `relative_path` - Relative path to the Parquet file
-    /// * `schema` - Arrow schema to use for extracting statistics
-    pub async fn get_parquet_column_stats(
-        &self,
-        relative_path: &str,
-        schema: &arrow_schema::Schema,
-    ) -> Result<StatisticsContainer> {
-        let parquet_meta = self.get_parquet_file_metadata(relative_path).await?;
-        Ok(StatisticsContainer::from_parquet_metadata(
-            &parquet_meta,
-            schema,
-        ))
-    }
+
 
     pub async fn get_file_data(&self, relative_path: &str) -> Result<Bytes> {
         let obj_url = join_url_segments(&self.base_url, &[relative_path])?;
