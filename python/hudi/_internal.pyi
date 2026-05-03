@@ -380,10 +380,14 @@ class HudiTable:
         Get the file slices the read targets, dispatching on ``options.query_type``.
 
         - Snapshot: slices visible at ``options.as_of_timestamp`` (defaults to the
-          latest commit). ``options.filters`` drive partition + file-level stats
-          pruning.
+          latest commit). ``options.filters`` drive partition pruning; file-level
+          stats pruning applies only for COW tables or MOR read-optimized mode.
+          When footer stats are loaded for pruning, exact ``num_records``,
+          ``byte_size``, and column stats are attached to the returned slices.
         - Incremental: slices changed in ``(options.start_timestamp,
           options.end_timestamp]``. ``options.filters`` drive partition pruning only.
+        - When ``UseReadOptimizedMode`` is enabled (via options or table config),
+          log files are stripped from all returned slices.
         """
         ...
     def create_file_group_reader_with_options(
@@ -394,22 +398,9 @@ class HudiTable:
         """
         Create a :class:`HudiFileGroupReader` using the table's Hudi configs.
 
-        Two override channels keep Hudi configs and storage credentials cleanly
-        separated — a ``hoodie.*`` key can't be misclassified as storage, and a
-        stray storage option can't be silently picked up as a Hudi config.
-
-        **Hudi configs** (last-writer-wins):
-
-        1. Table-level Hudi configs.
-        2. ``read_options.hudi_options`` when ``read_options`` is provided, **excluding**
-           the four keys the ``Table`` layer interprets directly (``query_type``,
-           ``as_of_timestamp``, ``start_timestamp``, ``end_timestamp``).
-        3. ``extra_hudi_overrides`` — caller-supplied resolved Hudi configs; always win.
-
-        **Storage options** (last-writer-wins):
-
-        1. Table-level storage options (cloud credentials, endpoints, etc).
-        2. ``extra_storage_overrides`` — caller-supplied per-path storage overrides.
+        ``read_options.hudi_options`` override table-level Hudi configs
+        (last-writer-wins). ``extra_storage_overrides`` override table-level
+        storage options (cloud credentials, endpoints, etc).
         """
         ...
     def read(

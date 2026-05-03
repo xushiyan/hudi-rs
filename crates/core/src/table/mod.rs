@@ -592,26 +592,9 @@ impl Table {
 
     /// Create a [FileGroupReader] using the [Table]'s Hudi configs.
     ///
-    /// Two override channels keep Hudi configs and storage credentials cleanly
-    /// separated — a `hoodie.*` key can't be misclassified as storage, and a
-    /// stray storage option can't be silently picked up as a Hudi config.
-    ///
-    /// **Hudi configs** (last-writer-wins):
-    /// 1. Table-level Hudi configs (constant for this `Table` instance).
-    /// 2. `read_options.hudi_options` when `read_options` is `Some`. The four
-    ///    `Table`-owned read keys ([`HudiReadConfig::QueryType`],
-    ///    [`HudiReadConfig::AsOfTimestamp`], [`HudiReadConfig::StartTimestamp`],
-    ///    [`HudiReadConfig::EndTimestamp`]) are stripped here: the `Table` layer
-    ///    interprets them for dispatch and snapshot resolution, and a stale value
-    ///    (e.g. an incremental `StartTimestamp` left in the bag) would silently
-    ///    activate commit-time filtering at the FG reader.
-    /// 3. `extra_hudi_overrides` — caller-supplied resolved Hudi configs;
-    ///    always win. Use these to inject the resolved timestamps for the
-    ///    current read.
-    ///
-    /// **Storage options** (last-writer-wins):
-    /// 1. Table-level storage options (cloud credentials, endpoints, etc).
-    /// 2. `extra_storage_overrides` — caller-supplied per-path storage overrides.
+    /// `read_options.hudi_options` override table-level Hudi configs
+    /// (last-writer-wins). `extra_storage_overrides` override table-level
+    /// storage options (cloud credentials, endpoints, etc).
     pub fn create_file_group_reader_with_options<S, K, V>(
         &self,
         read_options: Option<&ReadOptions>,
