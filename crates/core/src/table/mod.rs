@@ -458,13 +458,8 @@ impl Table {
                 let Some((start, end)) = self.resolve_incremental_range(&options)? else {
                     return Ok(Vec::new());
                 };
-                self.get_file_slices_between_inner(
-                    &start,
-                    &end,
-                    &options.filters,
-                    base_file_only,
-                )
-                .await
+                self.get_file_slices_between_inner(&start, &end, &options.filters, base_file_only)
+                    .await
             }
         }
     }
@@ -663,13 +658,8 @@ impl Table {
         options: &ReadOptions,
         snapshot_timestamp: &str,
     ) -> Result<FileGroupReader> {
-        let opts = options
-            .clone()
-            .with_end_timestamp(snapshot_timestamp);
-        self.create_file_group_reader_with_options(
-            Some(&opts),
-            std::iter::empty::<(&str, &str)>(),
-        )
+        let opts = options.clone().with_end_timestamp(snapshot_timestamp);
+        self.create_file_group_reader_with_options(Some(&opts), std::iter::empty::<(&str, &str)>())
     }
 
     async fn read_incremental_inner(&self, options: &ReadOptions) -> Result<Vec<RecordBatch>> {

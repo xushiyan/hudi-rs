@@ -29,7 +29,6 @@ use std::collections::HashMap;
 use arrow_schema::Schema;
 
 use crate::Result;
-use crate::table::ReadOptions;
 use crate::config::table::HudiTableConfig::{
     MetadataTableEnabled, MetadataTablePartitions, PartitionFields, TableVersion,
 };
@@ -37,6 +36,7 @@ use crate::error::CoreError;
 use crate::expr::filter::from_str_tuples;
 use crate::metadata::METADATA_TABLE_PARTITION_FIELD;
 use crate::storage::util::join_url_segments;
+use crate::table::ReadOptions;
 use crate::table::Table;
 use crate::table::file_pruner::FilePruner;
 use crate::table::partition::PartitionPruner;

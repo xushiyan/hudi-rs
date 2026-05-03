@@ -210,7 +210,9 @@ class HudiFileSlice:
         ...
     def base_file_column_stats(
         self,
-    ) -> Optional[Dict[str, Tuple[Optional["pyarrow.Array"], Optional["pyarrow.Array"]]]]:
+    ) -> Optional[
+        Dict[str, Tuple[Optional["pyarrow.Array"], Optional["pyarrow.Array"]]]
+    ]:
         """Column statistics (min, max) from the base file Parquet footer.
 
         Returns a dict mapping column names to ``(min_array, max_array)``

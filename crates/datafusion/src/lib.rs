@@ -128,8 +128,9 @@ impl HudiDataSource {
             .into_iter()
             .map(|(k, v)| (k.as_ref().to_string(), v.into()))
             .collect();
-        // DataFusion reads base files only via ParquetSource �� MOR log merging
-        // is not implemented. Force read-optimized mode regardless of caller input.
+        // DataFusion reads base files only via ParquetSource so force
+        // read-optimized mode regardless of caller input.
+        // TODO: Implement MOR log merging using custom Hudi source and remove this override.
         all_options.retain(|(k, _)| k != UseReadOptimizedMode.as_ref());
         all_options.push((
             UseReadOptimizedMode.as_ref().to_string(),

@@ -218,15 +218,16 @@ impl FileSystemView {
                     }
                 };
 
-                let stats =
-                    StatisticsContainer::from_parquet_metadata(&parquet_meta, table_schema);
+                let stats = StatisticsContainer::from_parquet_metadata(&parquet_meta, table_schema);
 
                 if file_pruner.should_include(&stats) {
                     let num_records = parquet_meta.file_metadata().num_rows();
-                    let (on_disk, byte_size) = parquet_meta.row_groups().iter().fold(
-                        (0i64, 0i64),
-                        |(d, b), rg| (d + rg.compressed_size(), b + rg.total_byte_size()),
-                    );
+                    let (on_disk, byte_size) = parquet_meta
+                        .row_groups()
+                        .iter()
+                        .fold((0i64, 0i64), |(d, b), rg| {
+                            (d + rg.compressed_size(), b + rg.total_byte_size())
+                        });
                     fsl.base_file.file_metadata = Some(FileMetadata {
                         name: fsl.base_file.file_name(),
                         size: on_disk.max(0) as u64,
