@@ -190,12 +190,26 @@ impl Storage {
         Ok(FileMetadata::new(name.to_string(), meta.size))
     }
 
+    /// Get the Arrow schema from a base file.
+    ///
+    /// Currently supports Parquet only; other formats (e.g., Lance) can be added.
+    pub async fn get_file_schema(
+        &self,
+        relative_path: &str,
+    ) -> Result<arrow_schema::Schema> {
+        let parquet_meta = self.get_parquet_file_metadata(relative_path).await?;
+        Ok(parquet_to_arrow_schema(
+            parquet_meta.file_metadata().schema_descr(),
+            None,
+        )?)
+    }
+
     /// Read a Parquet file's footer and return the raw metadata.
     ///
-    /// Use [`Self::get_file_metadata_and_stats`] when you need file stats and
-    /// column statistics together. This method is for callers that only need the
-    /// raw Parquet metadata (e.g., schema resolution, estimator sampling).
-    pub async fn get_parquet_file_metadata(
+    /// Internal API for callers that need raw row group details (estimator
+    /// sampling). Most callers should use [`Self::get_file_schema`] or
+    /// [`Self::get_file_metadata_and_stats`] instead.
+    pub(crate) async fn get_parquet_file_metadata(
         &self,
         relative_path: &str,
     ) -> Result<ParquetMetaData> {
