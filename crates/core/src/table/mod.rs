@@ -450,7 +450,8 @@ impl Table {
         let Some(timestamp) = self.resolve_snapshot_timestamp(options)? else {
             return Ok(Vec::new());
         };
-        self.get_file_slices_inner(&timestamp, &options.filters)
+        let base_file_only = !self.is_mor() || options.is_read_optimized();
+        self.get_file_slices_inner(&timestamp, &options.filters, base_file_only)
             .await
     }
 
@@ -466,6 +467,7 @@ impl Table {
         &self,
         timestamp: &str,
         filters: &[Filter],
+        base_file_only: bool,
     ) -> Result<Vec<FileSlice>> {
         let timeline_view = self.timeline.create_view_as_of(timestamp).await?;
 
@@ -481,8 +483,14 @@ impl Table {
         let partition_pruner =
             PartitionPruner::new(filters, &partition_schema, self.hudi_configs.as_ref())?;
 
-        // Create file pruner with filters on non-partition columns
-        let file_pruner = FilePruner::new(filters, &table_schema, &partition_schema)?;
+        // File-level stats pruning using base file Parquet footers is only safe
+        // when log files cannot introduce records that contradict the base file's
+        // min/max stats — i.e., COW tables or MOR read-optimized mode.
+        let file_pruner = if base_file_only {
+            FilePruner::new(filters, &table_schema, &partition_schema)?
+        } else {
+            FilePruner::empty()
+        };
 
         // Use cached metadata table instance if enabled
         let metadata_table = if self.is_metadata_table_enabled() {
@@ -655,8 +663,9 @@ impl Table {
         let Some(timestamp) = self.resolve_snapshot_timestamp(options)? else {
             return Ok(Vec::new());
         };
+        let base_file_only = !self.is_mor() || options.is_read_optimized();
         let file_slices = self
-            .get_file_slices_inner(&timestamp, &options.filters)
+            .get_file_slices_inner(&timestamp, &options.filters, base_file_only)
             .await?;
         let fg_reader = self.create_file_group_reader_for_snapshot(options, &timestamp)?;
         let fg_options = self.options_for_file_group(options);
@@ -823,8 +832,9 @@ impl Table {
             return Ok(Box::pin(stream::empty()));
         };
 
+        let base_file_only = !self.is_mor() || options.is_read_optimized();
         let file_slices = self
-            .get_file_slices_inner(&timestamp, &options.filters)
+            .get_file_slices_inner(&timestamp, &options.filters, base_file_only)
             .await?;
 
         if file_slices.is_empty() {

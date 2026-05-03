@@ -30,8 +30,10 @@ use crate::file_group::FileGroup;
 use crate::file_group::builder::file_groups_from_files_partition_records;
 use crate::file_group::file_slice::FileSlice;
 use crate::metadata::table::records::FilesPartitionRecord;
+use crate::statistics::StatisticsContainer;
 use crate::statistics::estimator::FileStatsEstimator;
 use crate::storage::Storage;
+use crate::storage::file_metadata::FileMetadata;
 use crate::table::Table;
 use crate::table::file_pruner::FilePruner;
 use crate::table::listing::FileLister;
@@ -201,23 +203,42 @@ impl FileSystemView {
                     continue;
                 }
 
-                // Load column stats from Parquet footer
-                let stats = match self
+                let parquet_meta = match self
                     .storage
-                    .get_parquet_column_stats(&relative_path, table_schema)
+                    .get_parquet_file_metadata(&relative_path)
                     .await
                 {
-                    Ok(s) => s,
+                    Ok(m) => m,
                     Err(e) => {
                         log::warn!(
-                            "Failed to load column stats for {relative_path}: {e}. Including file."
+                            "Failed to load parquet metadata for {relative_path}: {e}. Including file."
                         );
                         retained.push(fg);
                         continue;
                     }
                 };
 
+                let stats =
+                    StatisticsContainer::from_parquet_metadata(&parquet_meta, table_schema);
+
                 if file_pruner.should_include(&stats) {
+                    let num_records = parquet_meta.file_metadata().num_rows();
+                    let on_disk: i64 = parquet_meta
+                        .row_groups()
+                        .iter()
+                        .map(|rg| rg.compressed_size())
+                        .sum();
+                    let byte_size: i64 = parquet_meta
+                        .row_groups()
+                        .iter()
+                        .map(|rg| rg.total_byte_size())
+                        .sum();
+                    fsl.base_file.file_metadata = Some(FileMetadata {
+                        name: fsl.base_file.file_name(),
+                        size: on_disk.max(0) as u64,
+                        byte_size,
+                        num_records,
+                    });
                     retained.push(fg);
                 } else {
                     log::debug!("Pruned file {relative_path} based on column stats");
