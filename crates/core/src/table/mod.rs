@@ -871,30 +871,20 @@ impl Table {
 
     /// Compute estimated table-level statistics for scan planning.
     ///
-    /// When `options` carries `query_type == Incremental`, returns aggregate
-    /// `(num_records, total_bytes)` over the changed file slices in that range.
-    /// `start_timestamp` defaults to the earliest commit and `end_timestamp`
-    /// defaults to the latest commit when unset.
-    ///
-    /// Otherwise (snapshot or `None`), returns `(estimated_num_rows,
-    /// estimated_total_byte_size)` derived from the metadata table. Returns
-    /// `None` if the metadata table is not enabled or statistics cannot be
-    /// computed.
+    /// Returns `(estimated_num_rows, estimated_total_byte_size)` derived from
+    /// the metadata table for snapshot queries. Returns `None` if the metadata
+    /// table is not enabled, statistics cannot be computed, or the query type
+    /// is incremental (commit metadata does not reliably carry base file sizes
+    /// for all commit types).
     pub async fn compute_table_stats(&self, options: Option<&ReadOptions>) -> Option<(u64, u64)> {
         if let Some(opts) = options {
             match opts.query_type() {
-                Ok(QueryType::Incremental) => {
-                    return self.compute_change_stats_inner(opts).await.ok();
-                }
+                Ok(QueryType::Incremental) => return None,
                 Ok(QueryType::Snapshot) => {}
                 Err(_) => return None,
             }
         }
 
-        self.compute_snapshot_stats_inner().await
-    }
-
-    async fn compute_snapshot_stats_inner(&self) -> Option<(u64, u64)> {
         if !self.is_metadata_table_enabled() {
             return None;
         }
@@ -930,25 +920,6 @@ impl Table {
             estimated_total_rows.max(0) as u64,
             estimated_total_byte_size.max(0) as u64,
         ))
-    }
-
-    async fn compute_change_stats_inner(&self, options: &ReadOptions) -> Result<(u64, u64)> {
-        let file_slices = self.get_file_slices(options).await?;
-
-        // Both num_records and byte_size come from the base file only, estimated
-        // from its on-disk size via the sampled Parquet footer ratios.
-        //
-        // Base file metadata is populated only when the commit metadata's
-        // fileSizeInBytes refers to the base file (COW writes, MOR inserts,
-        // compaction). MOR delta commits report the log file size instead,
-        // so the base file metadata stays None and contributes 0 here.
-        let (total_records, total_bytes) = file_slices.iter().fold((0u64, 0u64), |(r, b), fs| {
-            let m = fs.base_file.file_metadata.as_ref();
-            let records = m.map(|m| m.num_records.max(0) as u64).unwrap_or(0);
-            let bytes = m.map(|m| m.byte_size.max(0) as u64).unwrap_or(0);
-            (r + records, b + bytes)
-        });
-        Ok((total_records, total_bytes))
     }
 }
 
@@ -1964,21 +1935,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compute_table_stats_incremental() {
+    async fn test_compute_table_stats_returns_none_for_incremental() {
         let base_url = SampleTable::V6SimplekeygenNonhivestyleOverwritetable.url_to_mor_parquet();
         let table = Table::new(base_url.path()).await.unwrap();
 
         let options = ReadOptions::new()
             .with_query_type(QueryType::Incremental)
             .with_end_timestamp("20250121000656060");
-        let stats = table.compute_table_stats(Some(&options)).await;
         assert!(
-            stats.is_some(),
-            "Incremental stats should be Some when changes exist"
+            table.compute_table_stats(Some(&options)).await.is_none(),
+            "Incremental stats should be None"
         );
-        let (rows, bytes) = stats.unwrap();
-        assert!(rows > 0, "Should have rows > 0, got {rows}");
-        assert!(bytes > 0, "Should have bytes > 0, got {bytes}");
     }
 
     #[tokio::test]

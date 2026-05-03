@@ -413,14 +413,11 @@ class HudiTable:
         self,
         options: Optional[HudiReadOptions] = None,
     ) -> Optional[Tuple[int, int]]:
-        """Compute estimated (rows, bytes).
+        """Compute estimated (rows, bytes) for snapshot queries.
 
-        With no options (or snapshot query type), returns snapshot stats
-        (requires the metadata table to be enabled). With incremental
-        query type, returns aggregate stats for the changes in the
-        ``(start_timestamp, end_timestamp]`` range; both timestamps
-        default to the earliest/latest commit when unset. Partition
-        filters are honored.
+        Returns snapshot stats derived from the metadata table (MDT).
+        Returns ``None`` when the MDT is not enabled, statistics cannot
+        be computed, or the query type is incremental.
         """
         ...
     def read_stream(

@@ -102,7 +102,7 @@ def test_get_incremental_file_slices_with_partition_filter():
     assert len(slices_eu) == 0
 
 
-def test_compute_table_stats_incremental():
+def test_compute_table_stats_returns_none_for_incremental():
     table = HudiTable(get_test_table_path("v9_txns_simple_nometa", "cow"))
     commits = _commits(table)
     assert len(commits) >= 2
@@ -113,11 +113,7 @@ def test_compute_table_stats_incremental():
         .with_start_timestamp(commits[0].timestamp)
         .with_end_timestamp(commits[1].timestamp)
     )
-    stats = table.compute_table_stats(options)
-    assert stats is not None
-    rows, bytes_ = stats
-    assert rows > 0
-    assert bytes_ > 0
+    assert table.compute_table_stats(options) is None
 
 
 def test_compute_table_stats_snapshot_unchanged():
